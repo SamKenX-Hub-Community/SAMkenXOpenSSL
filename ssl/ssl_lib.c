@@ -747,8 +747,10 @@ SSL *ossl_ssl_connection_new_int(SSL_CTX *ctx, const SSL_METHOD *method)
 
     s->options = ctx->options;
     s->dane.flags = ctx->dane.flags;
-    s->min_proto_version = ctx->min_proto_version;
-    s->max_proto_version = ctx->max_proto_version;
+    if (method->version == ctx->method->version) {
+        s->min_proto_version = ctx->min_proto_version;
+        s->max_proto_version = ctx->max_proto_version;
+    }
     s->mode = ctx->mode;
     s->max_cert_list = ctx->max_cert_list;
     s->max_early_data = ctx->max_early_data;
@@ -928,10 +930,39 @@ int SSL_is_dtls(const SSL *s)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
 
+#ifndef OPENSSL_NO_QUIC
+    if (s->type == SSL_TYPE_QUIC_CONNECTION || s->type == SSL_TYPE_QUIC_XSO)
+        return 0;
+#endif
+
     if (sc == NULL)
         return 0;
 
     return SSL_CONNECTION_IS_DTLS(sc) ? 1 : 0;
+}
+
+int SSL_is_tls(const SSL *s)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+
+#ifndef OPENSSL_NO_QUIC
+    if (s->type == SSL_TYPE_QUIC_CONNECTION || s->type == SSL_TYPE_QUIC_XSO)
+        return 0;
+#endif
+
+    if (sc == NULL)
+        return 0;
+
+    return SSL_CONNECTION_IS_DTLS(sc) ? 0 : 1;
+}
+
+int SSL_is_quic(const SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (s->type == SSL_TYPE_QUIC_CONNECTION || s->type == SSL_TYPE_QUIC_XSO)
+        return 1;
+#endif
+    return 0;
 }
 
 int SSL_up_ref(SSL *s)
@@ -1456,11 +1487,10 @@ void ossl_ssl_connection_free(SSL *ssl)
 void SSL_set0_rbio(SSL *s, BIO *rbio)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL) {
-        ossl_quic_conn_set0_net_rbio(qc, rbio);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s)) {
+        ossl_quic_conn_set0_net_rbio(s, rbio);
         return;
     }
 #endif
@@ -1476,11 +1506,10 @@ void SSL_set0_rbio(SSL *s, BIO *rbio)
 void SSL_set0_wbio(SSL *s, BIO *wbio)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL) {
-        ossl_quic_conn_set0_net_wbio(qc, wbio);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s)) {
+        ossl_quic_conn_set0_net_wbio(s, wbio);
         return;
     }
 #endif
@@ -1547,11 +1576,10 @@ void SSL_set_bio(SSL *s, BIO *rbio, BIO *wbio)
 BIO *SSL_get_rbio(const SSL *s)
 {
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    const QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_CONST_SSL(s);
 
-    if (qc != NULL)
-        return ossl_quic_conn_get_net_rbio(qc);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_conn_get_net_rbio(s);
 #endif
 
     if (sc == NULL)
@@ -1563,11 +1591,10 @@ BIO *SSL_get_rbio(const SSL *s)
 BIO *SSL_get_wbio(const SSL *s)
 {
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    const QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_CONST_SSL(s);
 
-    if (qc != NULL)
-        return ossl_quic_conn_get_net_rbio(qc);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_conn_get_net_wbio(s);
 #endif
 
     if (sc == NULL)
@@ -1847,13 +1874,11 @@ int SSL_has_pending(const SSL *s)
      * the records for some reason.
      */
     const SSL_CONNECTION *sc;
+
 #ifndef OPENSSL_NO_QUIC
-    const QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_CONST_SSL(s);
-
-    if (qc != NULL)
-        return ossl_quic_has_pending(qc);
+    if (IS_QUIC(s))
+        return ossl_quic_has_pending(s);
 #endif
-
 
     sc = SSL_CONNECTION_FROM_CONST_SSL(s);
 
@@ -2087,10 +2112,9 @@ int SSL_get_async_status(SSL *s, int *status)
 int SSL_accept(SSL *s)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
         return s->method->ssl_accept(s);
 #endif
 
@@ -2108,10 +2132,9 @@ int SSL_accept(SSL *s)
 int SSL_connect(SSL *s)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
         return s->method->ssl_connect(s);
 #endif
 
@@ -2214,10 +2237,9 @@ static int ssl_io_intern(void *vargs)
 int ssl_read_internal(SSL *s, void *buf, size_t num, size_t *readbytes)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
         return s->method->ssl_read(s, buf, num, readbytes);
 #endif
 
@@ -2367,10 +2389,9 @@ int SSL_get_early_data_status(const SSL *s)
 static int ssl_peek_internal(SSL *s, void *buf, size_t num, size_t *readbytes)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
         return s->method->ssl_peek(s, buf, num, readbytes);
 #endif
 
@@ -2438,10 +2459,9 @@ int SSL_peek_ex(SSL *s, void *buf, size_t num, size_t *readbytes)
 int ssl_write_internal(SSL *s, const void *buf, size_t num, size_t *written)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
         return s->method->ssl_write(s, buf, num, written);
 #endif
 
@@ -2670,11 +2690,10 @@ int SSL_shutdown(SSL *s)
      * (see ssl3_shutdown).
      */
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
-        return ossl_quic_conn_shutdown(qc, 0, NULL, 0);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_conn_shutdown(s, 0, NULL, 0);
 #endif
 
     if (sc == NULL)
@@ -2708,6 +2727,11 @@ int SSL_key_update(SSL *s, int updatetype)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
 
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_key_update(s, updatetype);
+#endif
+
     if (sc == NULL)
         return 0;
 
@@ -2740,6 +2764,11 @@ int SSL_key_update(SSL *s, int updatetype)
 int SSL_get_key_update_type(const SSL *s)
 {
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
+
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_get_key_update_type(s);
+#endif
 
     if (sc == NULL)
         return 0;
@@ -2845,10 +2874,6 @@ long SSL_ctrl(SSL *s, int cmd, long larg, void *parg)
         RECORD_LAYER_set_read_ahead(&sc->rlayer, larg);
         return l;
 
-    case SSL_CTRL_SET_MSG_CALLBACK_ARG:
-        sc->msg_callback_arg = parg;
-        return 1;
-
     case SSL_CTRL_MODE:
     {
         OSSL_PARAM options[2], *opts = options;
@@ -2943,22 +2968,7 @@ long SSL_ctrl(SSL *s, int cmd, long larg, void *parg)
 
 long SSL_callback_ctrl(SSL *s, int cmd, void (*fp) (void))
 {
-    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-
-    if (sc == NULL)
-        return 0;
-
-    switch (cmd) {
-    case SSL_CTRL_SET_MSG_CALLBACK:
-        sc->msg_callback = (void (*)
-                            (int write_p, int version, int content_type,
-                             const void *buf, size_t len, SSL *ssl,
-                             void *arg))(fp);
-        return 1;
-
-    default:
-        return s->method->ssl_callback_ctrl(s, cmd, fp);
-    }
+    return s->method->ssl_callback_ctrl(s, cmd, fp);
 }
 
 LHASH_OF(SSL_SESSION) *SSL_CTX_sessions(SSL_CTX *ctx)
@@ -4492,16 +4502,13 @@ int SSL_get_error(const SSL *s, int i)
     unsigned long l;
     BIO *bio;
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    const QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_CONST_SSL(s);
-#endif
 
     if (i > 0)
         return SSL_ERROR_NONE;
 
 #ifndef OPENSSL_NO_QUIC
-    if (qc != NULL) {
-        reason = ossl_quic_get_error(qc, i);
+    if (IS_QUIC(s)) {
+        reason = ossl_quic_get_error(s, i);
         if (reason != SSL_ERROR_NONE)
             return reason;
     }
@@ -4522,7 +4529,7 @@ int SSL_get_error(const SSL *s, int i)
     }
 
 #ifndef OPENSSL_NO_QUIC
-    if (qc == NULL)
+    if (!IS_QUIC(s))
 #endif
     {
         if (SSL_want_read(s)) {
@@ -4610,11 +4617,10 @@ int SSL_do_handshake(SSL *s)
 {
     int ret = 1;
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
-        return ossl_quic_do_handshake(qc);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_do_handshake(s);
 #endif
 
     if (sc->handshake_func == NULL) {
@@ -4644,11 +4650,10 @@ int SSL_do_handshake(SSL *s)
 void SSL_set_accept_state(SSL *s)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL) {
-        ossl_quic_set_accept_state(qc);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s)) {
+        ossl_quic_set_accept_state(s);
         return;
     }
 #endif
@@ -4664,11 +4669,10 @@ void SSL_set_accept_state(SSL *s)
 void SSL_set_connect_state(SSL *s)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(s);
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL) {
-        ossl_quic_set_connect_state(qc);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s)) {
+        ossl_quic_set_connect_state(s);
         return;
     }
 #endif
@@ -4741,10 +4745,31 @@ const char *SSL_get_version(const SSL *s)
 {
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
 
+#ifndef OPENSSL_NO_QUIC
+    /* We only support QUICv1 - so if its QUIC its QUICv1 */
+    if (s->type == SSL_TYPE_QUIC_CONNECTION || s->type == SSL_TYPE_QUIC_XSO)
+        return "QUICv1";
+#endif
+
     if (sc == NULL)
         return NULL;
 
     return ssl_protocol_to_string(sc->version);
+}
+
+__owur int SSL_get_handshake_rtt(const SSL *s, uint64_t *rtt)
+{
+    const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
+
+    if (sc == NULL)
+        return -1;
+    if (sc->ts_msg_write.t <= 0 || sc->ts_msg_read.t <= 0)
+        return 0; /* data not (yet) available */
+    if (sc->ts_msg_read.t < sc->ts_msg_write.t)
+        return -1;
+
+    *rtt = ossl_time2us(ossl_time_subtract(sc->ts_msg_read, sc->ts_msg_write));
+    return 1;
 }
 
 static int dup_ca_names(STACK_OF(X509_NAME) **dst, STACK_OF(X509_NAME) *src)
@@ -5077,6 +5102,11 @@ int SSL_version(const SSL *s)
 {
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
 
+#ifndef OPENSSL_NO_QUIC
+    /* We only support QUICv1 - so if its QUIC its QUICv1 */
+    if (s->type == SSL_TYPE_QUIC_CONNECTION || s->type == SSL_TYPE_QUIC_XSO)
+        return OSSL_QUIC1_VERSION;
+#endif
     /* TODO(QUIC): Do we want to report QUIC version this way instead? */
     if (sc == NULL)
         return 0;
@@ -7119,14 +7149,13 @@ int SSL_CTX_set0_tmp_dh_pkey(SSL_CTX *ctx, EVP_PKEY *dhpkey)
 }
 
 /* QUIC-specific methods which are supported on QUIC connections only. */
-int SSL_tick(SSL *s)
+int SSL_handle_events(SSL *s)
 {
     SSL_CONNECTION *sc;
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
 
-    if (qc != NULL)
-        return ossl_quic_tick(qc);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_handle_events(s);
 #endif
 
     sc = SSL_CONNECTION_FROM_SSL_ONLY(s);
@@ -7144,36 +7173,35 @@ int SSL_tick(SSL *s)
     return 1;
 }
 
-int SSL_get_tick_timeout(SSL *s, struct timeval *tv)
+int SSL_get_event_timeout(SSL *s, struct timeval *tv, int *is_infinite)
 {
     SSL_CONNECTION *sc;
-#ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc;
 
-    qc = QUIC_CONNECTION_FROM_SSL(s);
-    if (qc != NULL)
-        return ossl_quic_get_tick_timeout(qc, tv);
+#ifndef OPENSSL_NO_QUIC
+    if (IS_QUIC(s))
+        return ossl_quic_get_event_timeout(s, tv, is_infinite);
 #endif
 
     sc = SSL_CONNECTION_FROM_SSL_ONLY(s);
     if (sc != NULL && SSL_CONNECTION_IS_DTLS(sc)
-        && DTLSv1_get_timeout(s, tv))
+        && DTLSv1_get_timeout(s, tv)) {
+        *is_infinite = 0;
         return 1;
+    }
 
-    tv->tv_sec  = -1;
+    tv->tv_sec  = 1000000;
     tv->tv_usec = 0;
+    *is_infinite = 1;
     return 1;
 }
 
 int SSL_get_rpoll_descriptor(SSL *s, BIO_POLL_DESCRIPTOR *desc)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return -1;
 
-    return ossl_quic_get_rpoll_descriptor(qc, desc);
+    return ossl_quic_get_rpoll_descriptor(s, desc);
 #else
     return -1;
 #endif
@@ -7182,12 +7210,10 @@ int SSL_get_rpoll_descriptor(SSL *s, BIO_POLL_DESCRIPTOR *desc)
 int SSL_get_wpoll_descriptor(SSL *s, BIO_POLL_DESCRIPTOR *desc)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return -1;
 
-    return ossl_quic_get_wpoll_descriptor(qc, desc);
+    return ossl_quic_get_wpoll_descriptor(s, desc);
 #else
     return -1;
 #endif
@@ -7196,12 +7222,10 @@ int SSL_get_wpoll_descriptor(SSL *s, BIO_POLL_DESCRIPTOR *desc)
 int SSL_net_read_desired(SSL *s)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return 0;
 
-    return ossl_quic_get_net_read_desired(qc);
+    return ossl_quic_get_net_read_desired(s);
 #else
     return 0;
 #endif
@@ -7210,12 +7234,10 @@ int SSL_net_read_desired(SSL *s)
 int SSL_net_write_desired(SSL *s)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return 0;
 
-    return ossl_quic_get_net_write_desired(qc);
+    return ossl_quic_get_net_write_desired(s);
 #else
     return 0;
 #endif
@@ -7224,12 +7246,10 @@ int SSL_net_write_desired(SSL *s)
 int SSL_set_blocking_mode(SSL *s, int blocking)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return 0;
 
-    return ossl_quic_conn_set_blocking_mode(qc, blocking);
+    return ossl_quic_conn_set_blocking_mode(s, blocking);
 #else
     return 0;
 #endif
@@ -7238,12 +7258,10 @@ int SSL_set_blocking_mode(SSL *s, int blocking)
 int SSL_get_blocking_mode(SSL *s)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return -1;
 
-    return ossl_quic_conn_get_blocking_mode(qc);
+    return ossl_quic_conn_get_blocking_mode(s);
 #else
     return -1;
 #endif
@@ -7252,12 +7270,10 @@ int SSL_get_blocking_mode(SSL *s)
 int SSL_set_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(s);
-
-    if (qc == NULL)
+    if (!IS_QUIC(s))
         return 0;
 
-    return ossl_quic_conn_set_initial_peer_addr(qc, peer_addr);
+    return ossl_quic_conn_set_initial_peer_addr(s, peer_addr);
 #else
     return 0;
 #endif
@@ -7268,12 +7284,10 @@ int SSL_shutdown_ex(SSL *ssl, uint64_t flags,
                     size_t args_len)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(ssl);
-
-    if (qc == NULL)
+    if (!IS_QUIC(ssl))
         return SSL_shutdown(ssl);
 
-    return ossl_quic_conn_shutdown(qc, flags, args, args_len);
+    return ossl_quic_conn_shutdown(ssl, flags, args, args_len);
 #else
     return SSL_shutdown(ssl);
 #endif
@@ -7282,14 +7296,188 @@ int SSL_shutdown_ex(SSL *ssl, uint64_t flags,
 int SSL_stream_conclude(SSL *ssl, uint64_t flags)
 {
 #ifndef OPENSSL_NO_QUIC
-    QUIC_CONNECTION *qc = QUIC_CONNECTION_FROM_SSL(ssl);
-
-    if (qc == NULL)
+    if (!IS_QUIC(ssl))
         return 0;
 
-    return ossl_quic_conn_stream_conclude(qc);
+    return ossl_quic_conn_stream_conclude(ssl);
 #else
     return 0;
+#endif
+}
+
+SSL *SSL_new_stream(SSL *s, uint64_t flags)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return NULL;
+
+    return ossl_quic_conn_stream_new(s, flags);
+#else
+    return NULL;
+#endif
+}
+
+SSL *SSL_get0_connection(SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return s;
+
+    return ossl_quic_get0_connection(s);
+#else
+    return s;
+#endif
+}
+
+int SSL_is_connection(SSL *s)
+{
+    return SSL_get0_connection(s) == s;
+}
+
+int SSL_get_stream_type(SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return SSL_STREAM_TYPE_BIDI;
+
+    return ossl_quic_get_stream_type(s);
+#else
+    return SSL_STREAM_TYPE_BIDI;
+#endif
+}
+
+uint64_t SSL_get_stream_id(SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return UINT64_MAX;
+
+    return ossl_quic_get_stream_id(s);
+#else
+    return UINT64_MAX;
+#endif
+}
+
+int SSL_set_default_stream_mode(SSL *s, uint32_t mode)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_set_default_stream_mode(s, mode);
+#else
+    return 0;
+#endif
+}
+
+int SSL_set_incoming_stream_policy(SSL *s, int policy, uint64_t aec)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_set_incoming_stream_policy(s, policy, aec);
+#else
+    return 0;
+#endif
+}
+
+SSL *SSL_accept_stream(SSL *s, uint64_t flags)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return NULL;
+
+    return ossl_quic_accept_stream(s, flags);
+#else
+    return NULL;
+#endif
+}
+
+size_t SSL_get_accept_stream_queue_len(SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_get_accept_stream_queue_len(s);
+#else
+    return 0;
+#endif
+}
+
+int SSL_stream_reset(SSL *s,
+                     const SSL_STREAM_RESET_ARGS *args,
+                     size_t args_len)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_stream_reset(s, args, args_len);
+#else
+    return 0;
+#endif
+}
+
+int SSL_get_stream_read_state(SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return SSL_STREAM_STATE_NONE;
+
+    return ossl_quic_get_stream_read_state(s);
+#else
+    return SSL_STREAM_STATE_NONE;
+#endif
+}
+
+int SSL_get_stream_write_state(SSL *s)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return SSL_STREAM_STATE_NONE;
+
+    return ossl_quic_get_stream_write_state(s);
+#else
+    return SSL_STREAM_STATE_NONE;
+#endif
+}
+
+int SSL_get_stream_read_error_code(SSL *s, uint64_t *app_error_code)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return -1;
+
+    return ossl_quic_get_stream_read_error_code(s, app_error_code);
+#else
+    return -1;
+#endif
+}
+
+int SSL_get_stream_write_error_code(SSL *s, uint64_t *app_error_code)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return -1;
+
+    return ossl_quic_get_stream_write_error_code(s, app_error_code);
+#else
+    return -1;
+#endif
+}
+
+int SSL_get_conn_close_info(SSL *s, SSL_CONN_CLOSE_INFO *info,
+                            size_t info_len)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return -1;
+
+    return ossl_quic_get_conn_close_info(s, info, info_len);
+#else
+    return -1;
 #endif
 }
 

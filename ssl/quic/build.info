@@ -1,7 +1,7 @@
 $LIBSSL=../../libssl
 
 SOURCE[$LIBSSL]=quic_method.c quic_impl.c quic_wire.c quic_ackm.c quic_statm.c
-SOURCE[$LIBSSL]=cc_dummy.c quic_demux.c quic_record_rx.c
+SOURCE[$LIBSSL]=cc_newreno.c quic_demux.c quic_record_rx.c
 SOURCE[$LIBSSL]=quic_record_tx.c quic_record_util.c quic_record_shared.c quic_wire_pkt.c
 SOURCE[$LIBSSL]=quic_rx_depack.c
 SOURCE[$LIBSSL]=quic_fc.c uint_set.c
@@ -13,3 +13,4 @@ SOURCE[$LIBSSL]=quic_channel.c
 SOURCE[$LIBSSL]=quic_tserver.c
 SOURCE[$LIBSSL]=quic_tls.c
 SOURCE[$LIBSSL]=quic_thread_assist.c
+SOURCE[$LIBSSL]=quic_trace.c

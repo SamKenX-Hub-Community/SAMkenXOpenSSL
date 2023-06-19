@@ -58,6 +58,11 @@ void ossl_qtx_free(OSSL_QTX *qtx);
 void ossl_qtx_set_mutator(OSSL_QTX *qtx, ossl_mutate_packet_cb mutatecb,
                           ossl_finish_mutate_cb finishmutatecb, void *mutatearg);
 
+/* Setters for the msg_callback and the msg_callback_arg */
+void ossl_qtx_set_msg_callback(OSSL_QTX *qtx, ossl_msg_cb msg_callback,
+                               SSL *msg_callback_ssl);
+void ossl_qtx_set_msg_callback_arg(OSSL_QTX *qtx, void *msg_callback_arg);
+
 /*
  * Secret Management
  * -----------------
@@ -356,6 +361,12 @@ uint64_t ossl_qtx_get_cur_epoch_pkt_count(OSSL_QTX *qtx, uint32_t enc_level);
  * error condition to a peer is a Stateless Reset packet.
  */
 uint64_t ossl_qtx_get_max_epoch_pkt_count(OSSL_QTX *qtx, uint32_t enc_level);
+
+/*
+ * Get the 1-RTT EL key epoch number for the QTX. This is intended for
+ * diagnostic purposes. Returns 0 if 1-RTT EL is not provisioned yet.
+ */
+uint64_t ossl_qtx_get_key_epoch(OSSL_QTX *qtx);
 
 # endif
 

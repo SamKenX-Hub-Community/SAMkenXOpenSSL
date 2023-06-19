@@ -273,7 +273,7 @@ OSSL_CRMF_MSG *OSSL_CMP_CTX_setup_CRM(OSSL_CMP_CTX *ctx, int for_KUR, int rid)
     OSSL_CRMF_MSG *crm = NULL;
     X509 *refcert = ctx->oldCert != NULL ? ctx->oldCert : ctx->cert;
     /* refcert defaults to current client cert */
-    EVP_PKEY *rkey = OSSL_CMP_CTX_get0_newPkey(ctx, 0);
+    EVP_PKEY *rkey = ossl_cmp_ctx_get0_newPubkey(ctx);
     STACK_OF(GENERAL_NAME) *default_sans = NULL;
     const X509_NAME *ref_subj =
         refcert != NULL ? X509_get_subject_name(refcert) : NULL;
@@ -285,15 +285,9 @@ OSSL_CRMF_MSG *OSSL_CMP_CTX_setup_CRM(OSSL_CMP_CTX *ctx, int for_KUR, int rid)
     /* RFC5280: subjectAltName MUST be critical if subject is null */
     X509_EXTENSIONS *exts = NULL;
 
-    if (rkey == NULL && ctx->p10CSR != NULL)
-        rkey = X509_REQ_get0_pubkey(ctx->p10CSR);
-    if (rkey == NULL && refcert != NULL)
-        rkey = X509_get0_pubkey(refcert);
-    if (rkey == NULL)
-        rkey = ctx->pkey; /* default is independent of ctx->oldCert */
     if (rkey == NULL) {
 #ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-        ERR_raise(ERR_LIB_CMP, CMP_R_NULL_ARGUMENT);
+        ERR_raise(ERR_LIB_CMP, CMP_R_MISSING_PUBLIC_KEY);
         return NULL;
 #endif
     }
@@ -410,15 +404,9 @@ OSSL_CMP_MSG *ossl_cmp_certreq_new(OSSL_CMP_CTX *ctx, int type,
     if (type != OSSL_CMP_PKIBODY_P10CR) {
         EVP_PKEY *privkey = OSSL_CMP_CTX_get0_newPkey(ctx, 1);
 
-        /*
-         * privkey is NULL in case ctx->newPkey does not include a private key.
-         * We then may try to use ctx->pkey as fallback/default, but only
-         * if ctx-> newPkey does not include a (non-matching) public key:
-         */
-        if (privkey == NULL && OSSL_CMP_CTX_get0_newPkey(ctx, 0) == NULL)
-            privkey = ctx->pkey; /* default is independent of ctx->oldCert */
-        if (ctx->popoMethod == OSSL_CRMF_POPO_SIGNATURE && privkey == NULL) {
-            ERR_raise(ERR_LIB_CMP, CMP_R_MISSING_PRIVATE_KEY);
+        /* privkey is ctx->newPkey (if private, else NULL) or ctx->pkey */
+        if (ctx->popoMethod >= OSSL_CRMF_POPO_SIGNATURE && privkey == NULL) {
+            ERR_raise(ERR_LIB_CMP, CMP_R_MISSING_PRIVATE_KEY_FOR_POPO);
             goto err;
         }
         if (crm == NULL) {
@@ -684,7 +672,7 @@ int ossl_cmp_msg_gen_push1_ITAVs(OSSL_CMP_MSG *msg,
 }
 
 /*
- * Creates a new General Message/Response with an empty itav stack
+ * Creates a new General Message/Response with a copy of the given itav stack
  * returns a pointer to the PKIMessage on success, NULL on error
  */
 static OSSL_CMP_MSG *gen_new(OSSL_CMP_CTX *ctx,
@@ -793,8 +781,8 @@ int ossl_cmp_certstatus_set0_certHash(OSSL_CMP_CERTSTATUS *certStatus,
     return 1;
 }
 
-OSSL_CMP_MSG *ossl_cmp_certConf_new(OSSL_CMP_CTX *ctx, int fail_info,
-                                    const char *text)
+OSSL_CMP_MSG *ossl_cmp_certConf_new(OSSL_CMP_CTX *ctx, int certReqId,
+                                    int fail_info, const char *text)
 {
     OSSL_CMP_MSG *msg = NULL;
     OSSL_CMP_CERTSTATUS *certStatus = NULL;
@@ -803,7 +791,9 @@ OSSL_CMP_MSG *ossl_cmp_certConf_new(OSSL_CMP_CTX *ctx, int fail_info,
     ASN1_OCTET_STRING *certHash = NULL;
     OSSL_CMP_PKISI *sinfo;
 
-    if (!ossl_assert(ctx != NULL && ctx->newCert != NULL))
+    if (!ossl_assert(ctx != NULL && ctx->newCert != NULL
+                     && (certReqId == OSSL_CMP_CERTREQID
+                         || certReqId == OSSL_CMP_CERTREQID_NONE)))
         return NULL;
 
     if ((unsigned)fail_info > OSSL_CMP_PKIFAILUREINFO_MAX_BIT_PATTERN) {
@@ -821,9 +811,11 @@ OSSL_CMP_MSG *ossl_cmp_certConf_new(OSSL_CMP_CTX *ctx, int fail_info,
         OSSL_CMP_CERTSTATUS_free(certStatus);
         goto err;
     }
+
     /* set the ID of the certReq */
-    if (!ASN1_INTEGER_set(certStatus->certReqId, OSSL_CMP_CERTREQID))
+    if (!ASN1_INTEGER_set(certStatus->certReqId, certReqId))
         goto err;
+
     certStatus->hashAlg = NULL;
     /*
      * The hash of the certificate, using the same hash algorithm
@@ -977,12 +969,12 @@ static int suitable_rid(const ASN1_INTEGER *certReqId, int rid)
 {
     int trid;
 
-    if (rid == -1)
+    if (rid == OSSL_CMP_CERTREQID_NONE)
         return 1;
 
     trid = ossl_cmp_asn1_get_int(certReqId);
 
-    if (trid == -1) {
+    if (trid == OSSL_CMP_CERTREQID_NONE) {
         ERR_raise(ERR_LIB_CMP, CMP_R_BAD_REQUEST_ID);
         return 0;
     }
@@ -1043,14 +1035,15 @@ ossl_cmp_certrepmessage_get0_certresponse(const OSSL_CMP_CERTREPMESSAGE *crm,
 
 /*-
  * Retrieve the newly enrolled certificate from the given certResponse crep.
- * In case of indirect POPO uses the libctx and propq from ctx and private key.
+ * Uses libctx and propq from ctx, in case of indirect POPO also private key.
  * Returns a pointer to a copy of the found certificate, or NULL if not found.
  */
-X509 *ossl_cmp_certresponse_get1_cert(const OSSL_CMP_CERTRESPONSE *crep,
-                                      const OSSL_CMP_CTX *ctx, EVP_PKEY *pkey)
+X509 *ossl_cmp_certresponse_get1_cert(const OSSL_CMP_CTX *ctx,
+                                      const OSSL_CMP_CERTRESPONSE *crep)
 {
     OSSL_CMP_CERTORENCCERT *coec;
     X509 *crt = NULL;
+    EVP_PKEY *pkey;
 
     if (!ossl_assert(crep != NULL && ctx != NULL))
         return NULL;
@@ -1063,6 +1056,8 @@ X509 *ossl_cmp_certresponse_get1_cert(const OSSL_CMP_CERTRESPONSE *crep,
             break;
         case OSSL_CMP_CERTORENCCERT_ENCRYPTEDCERT:
             /* cert encrypted for indirect PoP; RFC 4210, 5.2.8.2 */
+            pkey = OSSL_CMP_CTX_get0_newPkey(ctx, 1);
+            /* pkey is ctx->newPkey (if private, else NULL) or ctx->pkey */
             if (pkey == NULL) {
                 ERR_raise(ERR_LIB_CMP, CMP_R_MISSING_PRIVATE_KEY);
                 return NULL;

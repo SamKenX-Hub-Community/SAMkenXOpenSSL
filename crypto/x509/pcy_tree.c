@@ -25,6 +25,8 @@
 # define OPENSSL_POLICY_TREE_NODES_MAX 1000
 #endif
 
+static void exnode_free(X509_POLICY_NODE *node);
+
 static void expected_print(BIO *channel,
                            X509_POLICY_LEVEL *lev, X509_POLICY_NODE *node,
                            int indent)
@@ -567,14 +569,22 @@ static int tree_calculate_user_set(X509_POLICY_TREE *tree,
                 | POLICY_DATA_FLAG_EXTRA_NODE;
             node = ossl_policy_level_add_node(NULL, extra, anyPolicy->parent,
                                               tree, 1);
+            if (node == NULL) {
+                ossl_policy_data_free(extra);
+                return 0;
+            }
         }
         if (!tree->user_policies) {
             tree->user_policies = sk_X509_POLICY_NODE_new_null();
-            if (!tree->user_policies)
-                return 1;
+            if (!tree->user_policies) {
+                exnode_free(node);
+                return 0;
+            }
         }
-        if (!sk_X509_POLICY_NODE_push(tree->user_policies, node))
+        if (!sk_X509_POLICY_NODE_push(tree->user_policies, node)) {
+            exnode_free(node);
             return 0;
+        }
     }
     return 1;
 }
@@ -689,6 +699,7 @@ int X509_policy_check(X509_POLICY_TREE **ptree, int *pexplicit_policy,
 
     if ((calc_ret = tree_calculate_authority_set(tree, &auth_nodes)) == 0)
         goto error;
+    sk_X509_POLICY_NODE_sort(auth_nodes);
     ret = tree_calculate_user_set(tree, policy_oids, auth_nodes);
     if (calc_ret == TREE_CALC_OK_DOFREE)
         sk_X509_POLICY_NODE_free(auth_nodes);

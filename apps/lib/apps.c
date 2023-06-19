@@ -336,6 +336,33 @@ static char *app_get_pass(const char *arg, int keepbio)
     return OPENSSL_strdup(tpass);
 }
 
+char *app_conf_try_string(const CONF *conf, const char *group, const char *name)
+{
+    char *res;
+
+    ERR_set_mark();
+    res = NCONF_get_string(conf, group, name);
+    if (res == NULL)
+        ERR_pop_to_mark();
+    else
+        ERR_clear_last_mark();
+    return res;
+}
+
+int app_conf_try_number(const CONF *conf, const char *group, const char *name,
+                        long *result)
+{
+    int ok;
+
+    ERR_set_mark();
+    ok = NCONF_get_number(conf, group, name, result);
+    if (!ok)
+        ERR_pop_to_mark();
+    else
+        ERR_clear_last_mark();
+    return ok;
+}
+
 CONF *app_load_config_bio(BIO *in, const char *filename)
 {
     long errorline = -1;
@@ -416,10 +443,8 @@ int add_oid_section(CONF *conf)
     CONF_VALUE *cnf;
     int i;
 
-    if ((p = NCONF_get_string(conf, NULL, "oid_section")) == NULL) {
-        ERR_clear_error();
+    if ((p = app_conf_try_string(conf, NULL, "oid_section")) == NULL)
         return 1;
-    }
     if ((sktmp = NCONF_get_section(conf, p)) == NULL) {
         BIO_printf(bio_err, "problem loading oid section %s\n", p);
         return 0;
@@ -527,7 +552,8 @@ X509_REQ *load_csr(const char *file, int format, const char *desc)
 }
 
 /* Better extend OSSL_STORE to support CSRs, see FR #15725 */
-X509_REQ *load_csr_autofmt(const char *infile, int format, const char *desc)
+X509_REQ *load_csr_autofmt(const char *infile, int format,
+                           STACK_OF(OPENSSL_STRING) *vfyopts, const char *desc)
 {
     X509_REQ *csr;
 
@@ -550,12 +576,12 @@ X509_REQ *load_csr_autofmt(const char *infile, int format, const char *desc)
     }
     if (csr != NULL) {
         EVP_PKEY *pkey = X509_REQ_get0_pubkey(csr);
-        int ret = do_X509_REQ_verify(csr, pkey, NULL /* vfyopts */);
+        int ret = do_X509_REQ_verify(csr, pkey, vfyopts);
 
         if (pkey == NULL || ret < 0)
-            BIO_puts(bio_err, "Warning: error while verifying CSR self-signature");
+            BIO_puts(bio_err, "Warning: error while verifying CSR self-signature\n");
         else if (ret == 0)
-            BIO_puts(bio_err, "Warning: CSR self-signature does not match the contents");
+            BIO_puts(bio_err, "Warning: CSR self-signature does not match the contents\n");
         return csr;
     }
     return csr;
@@ -664,13 +690,13 @@ void *app_malloc(size_t sz, const char *what)
 char *next_item(char *opt) /* in list separated by comma and/or space */
 {
     /* advance to separator (comma or whitespace), if any */
-    while (*opt != ',' && !isspace(*opt) && *opt != '\0')
+    while (*opt != ',' && !isspace(_UC(*opt)) && *opt != '\0')
         opt++;
     if (*opt != '\0') {
         /* terminate current item */
         *opt++ = '\0';
         /* skip over any whitespace after separator */
-        while (isspace(*opt))
+        while (isspace(_UC(*opt)))
             opt++;
     }
     return *opt == '\0' ? NULL : opt; /* NULL indicates end of input */
@@ -1379,8 +1405,12 @@ X509_STORE *setup_verify(const char *CAfile, int noCAfile,
         if (CAfile != NULL) {
             if (X509_LOOKUP_load_file_ex(lookup, CAfile, X509_FILETYPE_PEM,
                                          libctx, propq) <= 0) {
-                BIO_printf(bio_err, "Error loading file %s\n", CAfile);
-                goto end;
+                ERR_clear_error();
+                if (X509_LOOKUP_load_file_ex(lookup, CAfile, X509_FILETYPE_ASN1,
+                                             libctx, propq) <= 0) {
+                    BIO_printf(bio_err, "Error loading file %s\n", CAfile);
+                    goto end;
+                }
             }
         } else {
             X509_LOOKUP_load_file_ex(lookup, NULL, X509_FILETYPE_DEFAULT,
@@ -1679,12 +1709,11 @@ CA_DB *load_index(const char *dbfile, DB_ATTR *db_attr)
     else
         retdb->attributes.unique_subject = 1;
 
-    if (dbattr_conf) {
-        char *p = NCONF_get_string(dbattr_conf, NULL, "unique_subject");
+    if (dbattr_conf != NULL) {
+        char *p = app_conf_try_string(dbattr_conf, NULL, "unique_subject");
 
-        if (p) {
+        if (p != NULL)
             retdb->attributes.unique_subject = parse_yesno(p, 1);
-        }
     }
 
     retdb->dbfname = OPENSSL_strdup(dbfile);
@@ -2320,6 +2349,7 @@ int do_X509_sign(X509 *cert, int force_v1, EVP_PKEY *pkey, const char *md,
                              "keyid, issuer", !self_sign))
             goto end;
     }
+    /* May add further measures for ensuring RFC 5280 compliance, see #19805 */
 
     if (mctx != NULL && do_sign_init(mctx, pkey, md, sigopts) > 0)
         rv = (X509_sign_ctx(cert, mctx) > 0);
@@ -2469,7 +2499,7 @@ void store_setup_crl_download(X509_STORE *st)
     X509_STORE_set_lookup_crls_cb(st, crls_http_cb);
 }
 
-#ifndef OPENSSL_NO_SOCK
+#if !defined(OPENSSL_NO_SOCK) && !defined(OPENSSL_NO_HTTP)
 static const char *tls_error_hint(void)
 {
     unsigned long err = ERR_peek_error();
@@ -2524,6 +2554,10 @@ BIO *app_http_tls_cb(BIO *bio, void *arg, int connect, int detail)
     if (connect) {
         SSL *ssl;
         BIO *sbio = NULL;
+        X509_STORE *ts = SSL_CTX_get_cert_store(ssl_ctx);
+        X509_VERIFY_PARAM *vpm = X509_STORE_get0_param(ts);
+        const char *host = vpm == NULL ? NULL :
+            X509_VERIFY_PARAM_get0_host(vpm, 0 /* first hostname */);
 
         /* adapt after fixing callback design flaw, see #17088 */
         if ((info->use_proxy
@@ -2538,8 +2572,8 @@ BIO *app_http_tls_cb(BIO *bio, void *arg, int connect, int detail)
             return NULL;
         }
 
-        /* adapt after fixing callback design flaw, see #17088 */
-        SSL_set_tlsext_host_name(ssl, info->server); /* not critical to do */
+        if (vpm != NULL)
+            SSL_set_tlsext_host_name(ssl, host /* may be NULL */);
 
         SSL_set_connect_state(ssl);
         BIO_set_ssl(sbio, ssl, BIO_CLOSE);

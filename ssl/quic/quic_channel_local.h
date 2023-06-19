@@ -12,7 +12,7 @@
  * QUIC channel internals. It is intended that only the QUIC_CHANNEL
  * implementation and the RX depacketiser be allowed to access this structure
  * directly. As the RX depacketiser has no state of its own and computes over a
- * QUIC_CHANNEL structure, it can be viewed as an extention of the QUIC_CHANNEL
+ * QUIC_CHANNEL structure, it can be viewed as an extension of the QUIC_CHANNEL
  * implementation. While the RX depacketiser could be provided with adequate
  * accessors to do what it needs, this would weaken the abstraction provided by
  * the QUIC_CHANNEL to other components; moreover the coupling of the RX
@@ -69,9 +69,13 @@ struct quic_channel_st {
     OSSL_QUIC_TX_PACKETISER         *txp;
     QUIC_TXPIM                      *txpim;
     QUIC_CFQ                        *cfq;
-    /* Connection level FC. */
+    /*
+     * Connection level FC. The stream_count RXFCs is used to manage
+     * MAX_STREAMS signalling.
+     */
     QUIC_TXFC                       conn_txfc;
     QUIC_RXFC                       conn_rxfc;
+    QUIC_RXFC                       max_streams_bidi_rxfc, max_streams_uni_rxfc;
     QUIC_STREAM_MAP                 qsm;
     OSSL_STATM                      statm;
     OSSL_CC_DATA                    *cc_data;
@@ -89,6 +93,11 @@ struct quic_channel_st {
     OSSL_QTX                        *qtx;
     OSSL_QRX                        *qrx;
 
+    /* Message callback related arguments */
+    ossl_msg_cb                     msg_callback;
+    void                            *msg_callback_arg;
+    SSL                             *msg_callback_ssl;
+
     /*
      * Send and receive parts of the crypto streams.
      * crypto_send[QUIC_PN_SPACE_APP] is the 1-RTT crypto stream. There is no
@@ -96,12 +105,6 @@ struct quic_channel_st {
      */
     QUIC_SSTREAM                    *crypto_send[QUIC_PN_SPACE_NUM];
     QUIC_RSTREAM                    *crypto_recv[QUIC_PN_SPACE_NUM];
-
-    /*
-     * Our (currently only) application data stream. This is a bidirectional
-     * client-initiated stream and thus (in QUICv1) always has a stream ID of 0.
-     */
-    QUIC_STREAM                     *stream0;
 
     /* Internal state. */
     /*
@@ -124,15 +127,22 @@ struct quic_channel_st {
      */
     QUIC_CONN_ID                    retry_scid;
 
-    /* Server only: The DCID we currently use to talk to the peer. */
+    /* The DCID we currently use to talk to the peer and its sequence num. */
     QUIC_CONN_ID                    cur_remote_dcid;
+    uint64_t                        cur_remote_seq_num;
+    uint64_t                        cur_retire_prior_to;
     /* Server only: The DCID we currently expect the peer to use to talk to us. */
-    QUIC_CONN_ID                    cur_local_dcid;
+    QUIC_CONN_ID                    cur_local_cid;
+
+    /* Transport parameter values we send to our peer. */
+    uint64_t                        tx_init_max_stream_data_bidi_local;
+    uint64_t                        tx_init_max_stream_data_bidi_remote;
+    uint64_t                        tx_init_max_stream_data_uni;
 
     /* Transport parameter values received from server. */
-    uint64_t                        init_max_stream_data_bidi_local;
-    uint64_t                        init_max_stream_data_bidi_remote;
-    uint64_t                        init_max_stream_data_uni_remote;
+    uint64_t                        rx_init_max_stream_data_bidi_local;
+    uint64_t                        rx_init_max_stream_data_bidi_remote;
+    uint64_t                        rx_init_max_stream_data_uni;
     uint64_t                        rx_max_ack_delay; /* ms */
     unsigned char                   rx_ack_delay_exp;
 
@@ -160,6 +170,37 @@ struct quic_channel_st {
     /* Maximum active CID limit, as negotiated by transport parameters. */
     uint64_t                        rx_active_conn_id_limit;
 
+    /*
+     * Used to allocate stream IDs. This is a stream ordinal, i.e., a stream ID
+     * without the low two bits designating type and initiator. Shift and or in
+     * the type bits to convert to a stream ID.
+     */
+    uint64_t                        next_local_stream_ordinal_bidi;
+    uint64_t                        next_local_stream_ordinal_uni;
+
+    /*
+     * Used to track which stream ordinals within a given stream type have been
+     * used by the remote peer. This is an optimisation used to determine
+     * which streams should be implicitly created due to usage of a higher
+     * stream ordinal.
+     */
+    uint64_t                        next_remote_stream_ordinal_bidi;
+    uint64_t                        next_remote_stream_ordinal_uni;
+
+    /*
+     * Application error code to be used for STOP_SENDING/RESET_STREAM frames
+     * used to autoreject incoming streams.
+     */
+    uint64_t                        incoming_stream_auto_reject_aec;
+
+    /*
+     * Override packet count threshold at which we do a spontaneous TXKU.
+     * Usually UINT64_MAX in which case a suitable value is chosen based on AEAD
+     * limit advice from the QRL utility functions. This is intended for testing
+     * use only. Usually set to UINT64_MAX.
+     */
+    uint64_t                        txku_threshold_override;
+
     /* Valid if we are in the TERMINATING or TERMINATED states. */
     QUIC_TERMINATE_CAUSE            terminate_cause;
 
@@ -180,6 +221,34 @@ struct quic_channel_st {
      * idle timeout does not occur.
      */
     OSSL_TIME                       ping_deadline;
+
+    /*
+     * The deadline at which the period in which it is RECOMMENDED that we not
+     * initiate any spontaneous TXKU ends. This is zero if no such deadline
+     * applies.
+     */
+    OSSL_TIME                       txku_cooldown_deadline;
+
+    /*
+     * The deadline at which we take the QRX out of UPDATING and back to NORMAL.
+     * Valid if rxku_in_progress in 1.
+     */
+    OSSL_TIME                       rxku_update_end_deadline;
+
+    /*
+     * The first (application space) PN sent with a new key phase. Valid if the
+     * QTX key epoch is greater than 0. Once a packet we sent with a PN p (p >=
+     * txku_pn) is ACKed, the TXKU is considered completed and txku_in_progress
+     * becomes 0. For sanity's sake, such a PN p should also be <= the highest
+     * PN we have ever sent, of course.
+     */
+    QUIC_PN                         txku_pn;
+
+    /*
+     * The (application space) PN which triggered RXKU detection. Valid if
+     * rxku_pending_confirm.
+     */
+    QUIC_PN                         rxku_trigger_pn;
 
     /*
      * State tracking. QUIC connection-level state is best represented based on
@@ -283,6 +352,53 @@ struct quic_channel_st {
      * 10.1).
      */
     unsigned int                    have_sent_ack_eliciting_since_rx    : 1;
+
+    /* Should incoming streams automatically be rejected? */
+    unsigned int                    incoming_stream_auto_reject         : 1;
+
+    /*
+     * 1 if a key update sequence was locally initiated, meaning we sent the
+     * TXKU first and the resultant RXKU shouldn't result in our triggering
+     * another TXKU. 0 if a key update sequence was initiated by the peer,
+     * meaning we detect a RXKU first and have to generate a TXKU in response.
+     */
+    unsigned int                    ku_locally_initiated                : 1;
+
+    /*
+     * 1 if we have triggered TXKU (whether spontaneous or solicited) but are
+     * waiting for any PN using that new KP to be ACKed. While this is set, we
+     * are not allowed to trigger spontaneous TXKU (but solicited TXKU is
+     * potentially still possible).
+     */
+    unsigned int                    txku_in_progress                    : 1;
+
+    /*
+     * We have received an RXKU event and currently are going through
+     * UPDATING/COOLDOWN on the QRX. COOLDOWN is currently not used. Since RXKU
+     * cannot be detected in this state, this doesn't cause a protocol error or
+     * anything similar if a peer tries TXKU in this state. That traffic would
+     * simply be dropped. It's only used to track that our UPDATING timer is
+     * active so we know when to take the QRX out of UPDATING and back to
+     * NORMAL.
+     */
+    unsigned int                    rxku_in_progress                    : 1;
+
+    /*
+     * We have received an RXKU but have yet to send an ACK for it, which means
+     * no further RXKUs are allowed yet. Note that we cannot detect further
+     * RXKUs anyway while the QRX remains in the UPDATING/COOLDOWN states, so
+     * this restriction comes into play if we take more than PTO time to send
+     * an ACK for it (not likely).
+     */
+    unsigned int                    rxku_pending_confirm                : 1;
+
+    /* Temporary variable indicating rxku_pending_confirm is to become 0. */
+    unsigned int                    rxku_pending_confirm_done           : 1;
+
+    /*
+     * If set, RXKU is expected (because we initiated a spontaneous TXKU).
+     */
+    unsigned int                    rxku_expected                       : 1;
 };
 
 # endif

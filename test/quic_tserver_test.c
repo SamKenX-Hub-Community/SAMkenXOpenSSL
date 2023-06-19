@@ -12,6 +12,7 @@
 #include "internal/common.h"
 #include "internal/sockets.h"
 #include "internal/quic_tserver.h"
+#include "internal/quic_thread_assist.h"
 #include "internal/quic_ssl.h"
 #include "internal/time.h"
 #include "testutil.h"
@@ -64,7 +65,6 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
     union BIO_sock_info_u s_info = {0};
     SSL_CTX *c_ctx = NULL;
     SSL *c_ssl = NULL;
-    short port = 8186;
     int c_connected = 0, c_write_done = 0, c_begin_read = 0, s_read_done = 0;
     int c_wait_eos = 0, c_done_eos = 0;
     int c_start_idle_test = 0, c_done_idle_test = 0;
@@ -75,6 +75,13 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
     unsigned char alpn[] = { 8, 'o', 's', 's', 'l', 't', 'e', 's', 't' };
     OSSL_TIME (*now_cb)(void *arg) = use_fake_time ? fake_now : real_now;
     size_t limit_ms = 1000;
+
+#if defined(OPENSSL_NO_QUIC_THREAD_ASSIST)
+    if (use_thread_assist) {
+        TEST_skip("thread assisted mode not enabled");
+        return 1;
+    }
+#endif
 
     ina.s_addr = htonl(0x7f000001UL);
 
@@ -89,8 +96,7 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
     if (!TEST_ptr(s_addr_ = BIO_ADDR_new()))
         goto err;
 
-    if (!TEST_true(BIO_ADDR_rawmake(s_addr_, AF_INET, &ina, sizeof(ina),
-                                    htons(port))))
+    if (!TEST_true(BIO_ADDR_rawmake(s_addr_, AF_INET, &ina, sizeof(ina), 0)))
         goto err;
 
     if (!TEST_true(BIO_bind(s_fd, s_addr_, 0)))
@@ -159,7 +165,8 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
         goto err;
 
     if (use_fake_time)
-        ossl_quic_conn_set_override_now_cb(c_ssl, fake_now, NULL);
+        if (!TEST_true(ossl_quic_conn_set_override_now_cb(c_ssl, fake_now, NULL)))
+            goto err;
 
     /* 0 is a success for SSL_set_alpn_protos() */
     if (!TEST_false(SSL_set_alpn_protos(c_ssl, alpn, sizeof(alpn))))
@@ -215,16 +222,17 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
         }
 
         if (c_connected && c_write_done && !s_read_done) {
-            if (!ossl_quic_tserver_read(tserver,
+            if (!ossl_quic_tserver_read(tserver, 0,
                                         (unsigned char *)msg2 + s_total_read,
                                         sizeof(msg2) - s_total_read, &l)) {
-                if (!TEST_true(ossl_quic_tserver_has_read_ended(tserver)))
+                if (!TEST_true(ossl_quic_tserver_has_read_ended(tserver, 0)))
                     goto err;
 
                 if (!TEST_mem_eq(msg1, sizeof(msg1) - 1, msg2, s_total_read))
                     goto err;
 
                 s_begin_write = 1;
+                s_read_done   = 1;
             } else {
                 s_total_read += l;
                 if (!TEST_size_t_le(s_total_read, sizeof(msg1) - 1))
@@ -233,7 +241,7 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
         }
 
         if (s_begin_write && s_total_written < sizeof(msg1) - 1) {
-            if (!TEST_true(ossl_quic_tserver_write(tserver,
+            if (!TEST_true(ossl_quic_tserver_write(tserver, 0,
                                                    (unsigned char *)msg2 + s_total_written,
                                                    sizeof(msg1) - 1 - s_total_written, &l)))
                 goto err;
@@ -241,7 +249,7 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
             s_total_written += l;
 
             if (s_total_written == sizeof(msg1) - 1) {
-                ossl_quic_tserver_conclude(tserver);
+                ossl_quic_tserver_conclude(tserver, 0);
                 c_begin_read = 1;
             }
         }
@@ -326,7 +334,7 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
          */
         if (!c_start_idle_test || c_done_idle_test) {
             /* Inhibit manual ticking during idle test to test TA mode. */
-            SSL_tick(c_ssl);
+            SSL_handle_events(c_ssl);
         }
 
         ossl_quic_tserver_tick(tserver);

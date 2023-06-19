@@ -36,6 +36,7 @@
 # include "internal/bio.h"
 # include "internal/ktls.h"
 # include "internal/time.h"
+# include "internal/ssl.h"
 # include "record/record.h"
 
 # ifdef OPENSSL_BUILD_SHLIBSSL
@@ -939,8 +940,7 @@ struct ssl_ctx_st {
     int read_ahead;
 
     /* callback that allows applications to peek at protocol messages */
-    void (*msg_callback) (int write_p, int version, int content_type,
-                          const void *buf, size_t len, SSL *ssl, void *arg);
+    ossl_msg_cb msg_callback;
     void *msg_callback_arg;
 
     uint32_t verify_mode;
@@ -1191,7 +1191,7 @@ typedef struct cert_pkey_st CERT_PKEY;
 
 #define SSL_TYPE_SSL_CONNECTION  0
 #define SSL_TYPE_QUIC_CONNECTION 1
-#define SSL_TYPE_QUIC_STREAM     2
+#define SSL_TYPE_QUIC_XSO        2
 
 struct ssl_st {
     int type;
@@ -1249,6 +1249,9 @@ struct ssl_connection_st {
     int quiet_shutdown;
     /* we have shut things down, 0x01 sent, 0x02 for received */
     int shutdown;
+    /* Timestamps used to calculate the handshake RTT */
+    OSSL_TIME ts_msg_write;
+    OSSL_TIME ts_msg_read;
     /* where we are */
     OSSL_STATEM statem;
     SSL_EARLY_DATA_STATE early_data_state;
@@ -2665,10 +2668,10 @@ __owur int dtls1_get_queue_priority(unsigned short seq, int is_ccs);
 int dtls1_retransmit_buffered_messages(SSL_CONNECTION *s);
 void dtls1_clear_received_buffer(SSL_CONNECTION *s);
 void dtls1_clear_sent_buffer(SSL_CONNECTION *s);
-void dtls1_get_message_header(unsigned char *data,
+void dtls1_get_message_header(const unsigned char *data,
                               struct hm_header_st *msg_hdr);
 __owur OSSL_TIME dtls1_default_timeout(void);
-__owur OSSL_TIME *dtls1_get_timeout(SSL_CONNECTION *s, OSSL_TIME *timeleft);
+__owur int dtls1_get_timeout(const SSL_CONNECTION *s, OSSL_TIME *timeleft);
 __owur int dtls1_check_timeout_num(SSL_CONNECTION *s);
 __owur int dtls1_handle_timeout(SSL_CONNECTION *s);
 void dtls1_start_timer(SSL_CONNECTION *s);
@@ -2764,6 +2767,7 @@ __owur int ssl_check_srvr_ecc_cert_and_alg(X509 *x, SSL_CONNECTION *s);
 SSL_COMP *ssl3_comp_find(STACK_OF(SSL_COMP) *sk, int n);
 
 __owur const TLS_GROUP_INFO *tls1_group_id_lookup(SSL_CTX *ctx, uint16_t curve_id);
+__owur const char *tls1_group_id2name(SSL_CTX *ctx, uint16_t group_id);
 __owur int tls1_group_id2nid(uint16_t group_id, int include_unknown);
 __owur uint16_t tls1_nid2group_id(int nid);
 __owur int tls1_check_group_id(SSL_CONNECTION *s, uint16_t group_id,

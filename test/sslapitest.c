@@ -816,7 +816,7 @@ static int test_no_ems(void)
     status = create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE);
     if (fips_ems_check) {
         if (status == 1) {
-            printf("When FIPS uses the EMS check a connection that doesnt use EMS should fail\n");
+            printf("When FIPS uses the EMS check a connection that doesn't use EMS should fail\n");
             goto end;
         }
     } else {
@@ -1708,7 +1708,7 @@ static int execute_cleanse_plaintext(const SSL_METHOD *smeth,
     SSL_CTX *cctx = NULL, *sctx = NULL;
     SSL *clientssl = NULL, *serverssl = NULL;
     int testresult = 0;
-    void *zbuf;
+    const unsigned char *zbuf;
     SSL_CONNECTION *serversc;
     TLS_RECORD *rr;
 
@@ -2285,7 +2285,9 @@ static int execute_test_session(int maxprot, int use_int_cache,
          */
         if (use_int_cache && maxprot != TLS1_3_VERSION) {
             if (!TEST_ptr(tmp = SSL_SESSION_dup(sess2))
-                    || !TEST_true(SSL_CTX_remove_session(sctx, sess2)))
+                || !TEST_true(sess2->owner != NULL)
+                || !TEST_true(tmp->owner == NULL)
+                || !TEST_true(SSL_CTX_remove_session(sctx, sess2)))
                 goto end;
             SSL_SESSION_free(sess2);
         }
@@ -3967,7 +3969,7 @@ static int early_data_skip_helper(int testtype, int cipher, int idx)
         if (!TEST_true(SSL_set1_groups_list(serverssl, "ffdhe3072")))
             goto end;
 #else
-        if (!TEST_true(SSL_set1_groups_list(serverssl, "P-256")))
+        if (!TEST_true(SSL_set1_groups_list(serverssl, "P-384")))
             goto end;
 #endif
     } else if (idx == 2) {
@@ -4890,7 +4892,11 @@ static int test_ciphersuite_change(void)
  */
 # ifndef OPENSSL_NO_EC
 static int ecdhe_kexch_groups[] = {NID_X9_62_prime256v1, NID_secp384r1,
-                                   NID_secp521r1, NID_X25519, NID_X448};
+                                   NID_secp521r1,
+#  ifndef OPENSSL_NO_ECX
+                                   NID_X25519, NID_X448
+#  endif
+                                   };
 # endif
 # ifndef OPENSSL_NO_DH
 static int ffdhe_kexch_groups[] = {NID_ffdhe2048, NID_ffdhe3072, NID_ffdhe4096,
@@ -4931,6 +4937,7 @@ static int test_key_exchange(int idx)
             kexch_alg = NID_secp521r1;
             kexch_name0 = "secp521r1";
             break;
+#  ifndef OPENSSL_NO_ECX
         case 4:
             kexch_alg = NID_X25519;
             kexch_name0 = "x25519";
@@ -4939,6 +4946,7 @@ static int test_key_exchange(int idx)
             kexch_alg = NID_X448;
             kexch_name0 = "x448";
             break;
+#  endif
 # endif
 # ifndef OPENSSL_NO_DH
 # ifndef OPENSSL_NO_TLS1_2
@@ -5035,6 +5043,9 @@ static int test_key_exchange(int idx)
 
     /* We don't implement RFC 7919 named groups for TLS 1.2. */
     if (idx != 13) {
+        if (!TEST_str_eq(SSL_get0_group_name(serverssl), kexch_name0)
+            || !TEST_str_eq(SSL_get0_group_name(clientssl), kexch_name0))
+            goto end;
         if (!TEST_int_eq(SSL_get_negotiated_group(serverssl), kexch_groups[0]))
             goto end;
         if (!TEST_int_eq(SSL_get_negotiated_group(clientssl), kexch_groups[0]))
@@ -5579,7 +5590,7 @@ static int test_tls13_psk(int idx)
     if (!TEST_true(SSL_set1_groups_list(serverssl, "ffdhe3072")))
         goto end;
 #else
-    if (!TEST_true(SSL_set1_groups_list(serverssl, "P-256")))
+    if (!TEST_true(SSL_set1_groups_list(serverssl, "P-384")))
         goto end;
 #endif
 
@@ -9345,8 +9356,13 @@ static int test_sigalgs_available(int idx)
         } else {
             if (!TEST_true(filter_provider_set_filter(OSSL_OP_SIGNATURE,
                                                       "ECDSA"))
+# ifdef OPENSSL_NO_ECX
+                    || !TEST_true(filter_provider_set_filter(OSSL_OP_KEYMGMT, "EC"))
+# else
                     || !TEST_true(filter_provider_set_filter(OSSL_OP_KEYMGMT,
-                                                             "EC:X25519:X448")))
+                                                             "EC:X25519:X448"))
+# endif
+                )
                 goto end;
         }
 
@@ -9491,6 +9507,10 @@ static int test_pluggable_group(int idx)
 
     if (!TEST_str_eq(group_name,
                      SSL_group_to_name(serverssl, SSL_get_shared_group(serverssl, 0))))
+        goto end;
+
+    if (!TEST_str_eq(group_name, SSL_get0_group_name(serverssl))
+        || !TEST_str_eq(group_name, SSL_get0_group_name(clientssl)))
         goto end;
 
     testresult = 1;
@@ -10825,6 +10845,225 @@ end:
 }
 #endif /* !defined(OPENSSL_NO_TLS1_2) && !defined(OPENSSL_NO_DYNAMIC_ENGINE) */
 
+static int check_version_string(SSL *s, int version)
+{
+    const char *verstr = NULL;
+
+    switch (version) {
+    case SSL3_VERSION:
+        verstr = "SSLv3";
+        break;
+    case TLS1_VERSION:
+        verstr = "TLSv1";
+        break;
+    case TLS1_1_VERSION:
+        verstr = "TLSv1.1";
+        break;
+    case TLS1_2_VERSION:
+        verstr = "TLSv1.2";
+        break;
+    case TLS1_3_VERSION:
+        verstr = "TLSv1.3";
+        break;
+    case DTLS1_VERSION:
+        verstr = "DTLSv1";
+        break;
+    case DTLS1_2_VERSION:
+        verstr = "DTLSv1.2";
+    }
+
+    return TEST_str_eq(verstr, SSL_get_version(s));
+}
+
+/*
+ * Test that SSL_version, SSL_get_version, SSL_is_quic, SSL_is_tls and
+ * SSL_is_dtls return the expected results for a (D)TLS connection. Compare with
+ * test_version() in quicapitest.c which does the same thing for QUIC
+ * connections.
+ */
+static int test_version(int idx)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL;
+    int testresult = 0, version;
+    const SSL_METHOD *servmeth = TLS_server_method();
+    const SSL_METHOD *clientmeth = TLS_client_method();
+
+    switch (idx) {
+#if !defined(OPENSSL_NO_SSL3)
+    case 0:
+        version = SSL3_VERSION;
+        break;
+#endif
+#if !defined(OPENSSL_NO_TLS1)
+    case 1:
+        version = TLS1_VERSION;
+        break;
+#endif
+#if !defined(OPENSSL_NO_TLS1_2)
+    case 2:
+        version = TLS1_2_VERSION;
+        break;
+#endif
+#if !defined(OSSL_NO_USABLE_TLS1_3)
+    case 3:
+        version = TLS1_3_VERSION;
+        break;
+#endif
+#if !defined(OPENSSL_NO_DTLS1)
+    case 4:
+        version = DTLS1_VERSION;
+        break;
+#endif
+#if !defined(OPENSSL_NO_DTLS1_2)
+    case 5:
+        version = DTLS1_2_VERSION;
+        break;
+#endif
+    /*
+     * NB we do not support QUIC in this test. That is covered by quicapitest.c
+     * We also don't support DTLS1_BAD_VER since we have no server support for
+     * that.
+     */
+    default:
+        TEST_skip("Unsupported protocol version");
+        return 1;
+    }
+
+    if (is_fips
+            && (version == SSL3_VERSION
+                || version == TLS1_VERSION
+                || version == DTLS1_VERSION)) {
+        TEST_skip("Protocol version not supported with FIPS");
+        return 1;
+    }
+
+#if !defined(OPENSSL_NO_DTLS)
+    if (version == DTLS1_VERSION || version == DTLS1_2_VERSION) {
+        servmeth = DTLS_server_method();
+        clientmeth = DTLS_client_method();
+    }
+#endif
+
+    if (!TEST_true(create_ssl_ctx_pair(libctx, servmeth, clientmeth, version,
+                                       version, &sctx, &cctx, cert, privkey)))
+        goto end;
+
+    if (!TEST_true(SSL_CTX_set_cipher_list(sctx, "DEFAULT:@SECLEVEL=0"))
+            || !TEST_true(SSL_CTX_set_cipher_list(cctx,
+                                                "DEFAULT:@SECLEVEL=0")))
+        goto end;
+
+    if (!TEST_true(create_ssl_objects(sctx, cctx, &serverssl,
+                                      &clientssl, NULL, NULL)))
+        goto end;
+
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE)))
+        goto end;
+
+    if (!TEST_int_eq(SSL_version(serverssl), version)
+            || !TEST_int_eq(SSL_version(clientssl), version)
+            || !TEST_true(check_version_string(serverssl, version))
+            || !TEST_true(check_version_string(clientssl, version)))
+        goto end;
+
+    if (version == DTLS1_VERSION || version == DTLS1_2_VERSION) {
+        if (!TEST_true(SSL_is_dtls(serverssl))
+                || !TEST_true(SSL_is_dtls(clientssl))
+                || !TEST_false(SSL_is_tls(serverssl))
+                || !TEST_false(SSL_is_tls(clientssl))
+                || !TEST_false(SSL_is_quic(serverssl))
+                || !TEST_false(SSL_is_quic(clientssl)))
+        goto end;
+    } else {
+        if (!TEST_true(SSL_is_tls(serverssl))
+                || !TEST_true(SSL_is_tls(clientssl))
+                || !TEST_false(SSL_is_dtls(serverssl))
+                || !TEST_false(SSL_is_dtls(clientssl))
+                || !TEST_false(SSL_is_quic(serverssl))
+                || !TEST_false(SSL_is_quic(clientssl)))
+        goto end;
+    }
+
+    testresult = 1;
+end:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+/*
+ * Test that the SSL_rstate_string*() APIs return sane results
+ */
+static int test_rstate_string(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL;
+    int testresult = 0, version;
+    const SSL_METHOD *servmeth = TLS_server_method();
+    const SSL_METHOD *clientmeth = TLS_client_method();
+    size_t written, readbytes;
+    unsigned char buf[2];
+    unsigned char dummyheader[SSL3_RT_HEADER_LENGTH] = {
+        SSL3_RT_APPLICATION_DATA,
+        TLS1_2_VERSION_MAJOR,
+        0, /* To be filled in later */
+        0,
+        1
+    };
+
+    if (!TEST_true(create_ssl_ctx_pair(libctx, servmeth, clientmeth, 0,
+                                       0, &sctx, &cctx, cert, privkey)))
+        goto end;
+
+    if (!TEST_true(create_ssl_objects(sctx, cctx, &serverssl,
+                                      &clientssl, NULL, NULL)))
+        goto end;
+
+    if (!TEST_str_eq(SSL_rstate_string(serverssl), "RH")
+            || !TEST_str_eq(SSL_rstate_string_long(serverssl), "read header"))
+        goto end;
+
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE)))
+        goto end;
+
+    if (!TEST_str_eq(SSL_rstate_string(serverssl), "RH")
+            || !TEST_str_eq(SSL_rstate_string_long(serverssl), "read header"))
+        goto end;
+
+    /* Fill in the correct version for the record header */
+    version = SSL_version(serverssl);
+    if (version == TLS1_3_VERSION)
+        version = TLS1_2_VERSION;
+    dummyheader[2] = version & 0xff;
+
+    /*
+     * Send a dummy header. If we continued to read the body as well this
+     * would fail with a bad record mac, but we're not going to go that far.
+     */
+    if (!TEST_true(BIO_write_ex(SSL_get_rbio(serverssl), dummyheader,
+                                sizeof(dummyheader), &written))
+            || !TEST_size_t_eq(written, SSL3_RT_HEADER_LENGTH))
+        goto end;
+
+    if (!TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &readbytes)))
+        goto end;
+
+    if (!TEST_str_eq(SSL_rstate_string(serverssl), "RB")
+            || !TEST_str_eq(SSL_rstate_string_long(serverssl), "read body"))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
 OPT_TEST_DECLARE_USAGE("certfile privkeyfile srpvfile tmpfile provider config dhfile\n")
 
 int setup_tests(void)
@@ -11128,6 +11367,8 @@ int setup_tests(void)
 #if !defined(OPENSSL_NO_TLS1_2) && !defined(OPENSSL_NO_DYNAMIC_ENGINE)
     ADD_ALL_TESTS(test_pipelining, 6);
 #endif
+    ADD_ALL_TESTS(test_version, 6);
+    ADD_TEST(test_rstate_string);
     return 1;
 
  err:

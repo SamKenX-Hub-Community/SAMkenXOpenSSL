@@ -3761,6 +3761,10 @@ long ssl3_ctrl(SSL *s, int cmd, long larg, void *parg)
             return (int)sc->ext.peer_supportedgroups_len;
         }
 
+    case SSL_CTRL_SET_MSG_CALLBACK_ARG:
+        sc->msg_callback_arg = parg;
+        return 1;
+
     default:
         break;
     }
@@ -3792,6 +3796,10 @@ long ssl3_callback_ctrl(SSL *s, int cmd, void (*fp) (void))
         sc->not_resumable_session_cb = (int (*)(SSL *, int))fp;
         ret = 1;
         break;
+
+    case SSL_CTRL_SET_MSG_CALLBACK:
+        sc->msg_callback = (ossl_msg_cb)fp;
+        return 1;
     default:
         break;
     }
@@ -5012,6 +5020,22 @@ int ssl_encapsulate(SSL_CONNECTION *s, EVP_PKEY *pubkey,
     OPENSSL_free(ct);
     EVP_PKEY_CTX_free(pctx);
     return rv;
+}
+
+const char *SSL_get0_group_name(SSL *s)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+    unsigned int id;
+
+    if (sc == NULL)
+        return NULL;
+
+    if (SSL_CONNECTION_IS_TLS13(sc) && sc->s3.did_kex)
+        id = sc->s3.group_id;
+    else
+        id = sc->session->kex_group;
+
+    return tls1_group_id2name(s->ctx, id);
 }
 
 const char *SSL_group_to_name(SSL *s, int nid) {

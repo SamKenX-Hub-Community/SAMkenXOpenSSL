@@ -88,18 +88,13 @@ static int dir_ctrl(X509_LOOKUP *ctx, int cmd, const char *argp, long argl,
     switch (cmd) {
     case X509_L_ADD_DIR:
         if (argl == X509_FILETYPE_DEFAULT) {
-            /* If SSL_CERT_PATH is provided and non-empty, use that. */
-            const char *dir = ossl_safe_getenv(X509_get_default_cert_path_env());
+            const char *dir = ossl_safe_getenv(X509_get_default_cert_dir_env());
 
-            /* Fallback to SSL_CERT_DIR. */
-            if (dir == NULL)
-                dir = ossl_safe_getenv(X509_get_default_cert_dir_env());
-
-            /* Fallback to built-in default. */
-            if (dir == NULL)
-                dir = X509_get_default_cert_dir();
-
-            ret = add_cert_dir(ld, dir, X509_FILETYPE_PEM);
+            if (dir)
+                ret = add_cert_dir(ld, dir, X509_FILETYPE_PEM);
+            else
+                ret = add_cert_dir(ld, X509_get_default_cert_dir(),
+                                   X509_FILETYPE_PEM);
             if (!ret) {
                 ERR_raise(ERR_LIB_X509, X509_R_LOADING_CERT_DIR);
             }
@@ -348,12 +343,18 @@ static int get_cert_by_subject_ex(X509_LOOKUP *xl, X509_LOOKUP_TYPE type,
 
         /*
          * we have added it to the cache so now pull it out again
+         *
+         * Note: quadratic time find here since the objects won't generally be
+         *       sorted and sorting the would result in O(n^2 log n) complexity.
          */
-        X509_STORE_lock(xl->store_ctx);
-        j = sk_X509_OBJECT_find(xl->store_ctx->objs, &stmp);
-        tmp = sk_X509_OBJECT_value(xl->store_ctx->objs, j);
-        X509_STORE_unlock(xl->store_ctx);
-
+        if (k > 0) {
+            X509_STORE_lock(xl->store_ctx);
+            j = sk_X509_OBJECT_find(xl->store_ctx->objs, &stmp);
+            tmp = sk_X509_OBJECT_value(xl->store_ctx->objs, j);
+            X509_STORE_unlock(xl->store_ctx);
+        } else {
+            tmp = NULL;
+        }
         /*
          * If a CRL, update the last file suffix added for this.
          * We don't need to add an entry if k is 0 as this is the initial value.
@@ -417,6 +418,13 @@ static int get_cert_by_subject_ex(X509_LOOKUP *xl, X509_LOOKUP_TYPE type,
         }
     }
  finish:
+    /* If we changed anything, resort the objects for faster lookup */
+    if (!sk_X509_OBJECT_is_sorted(xl->store_ctx->objs)) {
+        X509_STORE_lock(xl->store_ctx);
+        sk_X509_OBJECT_sort(xl->store_ctx->objs);
+        X509_STORE_unlock(xl->store_ctx);
+    }
+
     BUF_MEM_free(b);
     return ok;
 }

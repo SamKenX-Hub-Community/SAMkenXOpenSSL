@@ -121,6 +121,8 @@ void RAND_keep_random_devices_open(int keep)
  */
 int RAND_poll(void)
 {
+    static const char salt[] = "polling";
+
 # ifndef OPENSSL_NO_DEPRECATED_3_0
     const RAND_METHOD *meth = RAND_get_rand_method();
     int ret = meth == RAND_OpenSSL();
@@ -149,14 +151,12 @@ int RAND_poll(void)
         ret = 1;
      err:
         ossl_rand_pool_free(pool);
+        return ret;
     }
-    return ret;
-# else
-    static const char salt[] = "polling";
+# endif
 
     RAND_seed(salt, sizeof(salt));
     return 1;
-# endif
 }
 
 # ifndef OPENSSL_NO_DEPRECATED_3_0
@@ -188,6 +188,13 @@ const RAND_METHOD *RAND_get_rand_method(void)
 
     if (!RUN_ONCE(&rand_init, do_rand_init))
         return NULL;
+
+    if (!CRYPTO_THREAD_read_lock(rand_meth_lock))
+        return NULL;
+    tmp_meth = default_RAND_meth;
+    CRYPTO_THREAD_unlock(rand_meth_lock);
+    if (tmp_meth != NULL)
+        return tmp_meth;
 
     if (!CRYPTO_THREAD_write_lock(rand_meth_lock))
         return NULL;
@@ -273,7 +280,13 @@ void RAND_add(const void *buf, int num, double randomness)
 # endif
     drbg = RAND_get0_primary(NULL);
     if (drbg != NULL && num > 0)
+# ifdef OPENSSL_RAND_SEED_NONE
+        /* Without an entropy source, we have to rely on the user */
+        EVP_RAND_reseed(drbg, 0, buf, num, NULL, 0);
+# else
+        /* With an entropy source, we downgrade this to additional input */
         EVP_RAND_reseed(drbg, 0, NULL, 0, buf, num);
+# endif
 }
 
 # if !defined(OPENSSL_NO_DEPRECATED_1_1_0)

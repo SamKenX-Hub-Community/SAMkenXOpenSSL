@@ -22,6 +22,8 @@
 #define KEM_SECONDS     PKEY_SECONDS
 #define SIG_SECONDS     PKEY_SECONDS
 
+#define MAX_ALGNAME_SUFFIX 100
+
 /* We need to use some deprecated APIs */
 #define OPENSSL_SUPPRESS_DEPRECATED
 
@@ -124,11 +126,10 @@ static int mr = 0;  /* machine-readeable output format to merge fork results */
 static int usertime = 1;
 
 static double Time_F(int s);
-static void print_message(const char *s, long num, int length, int tm);
+static void print_message(const char *s, int length, int tm);
 static void pkey_print_message(const char *str, const char *str2,
-                               long num, unsigned int bits, int sec);
-static void kskey_print_message(const char *str, const char *str2, long num,
-                                 int tm);
+                               unsigned int bits, int sec);
+static void kskey_print_message(const char *str, const char *str2, int tm);
 static void print_result(int alg, int run_no, int count, double time_used);
 #ifndef NO_FORK
 static int do_multi(int multi, int size_num);
@@ -151,7 +152,7 @@ static const int aead_lengths_list[] = {
 
 #ifdef SIGALRM
 
-static void alarmed(int sig)
+static void alarmed(ossl_unused int sig)
 {
     signal(SIGALRM, alarmed);
     run = 0;
@@ -435,7 +436,13 @@ static const OPT_PAIR ecdsa_choices[ECDSA_NUM] = {
     {"ecdsabrp512r1", R_EC_BRP512R1},
     {"ecdsabrp512t1", R_EC_BRP512T1}
 };
-enum { R_EC_X25519 = ECDSA_NUM, R_EC_X448, EC_NUM };
+enum {
+#ifndef OPENSSL_NO_ECX
+    R_EC_X25519 = ECDSA_NUM, R_EC_X448, EC_NUM
+#else
+    EC_NUM = ECDSA_NUM
+#endif
+};
 /* list of ecdh curves, extension of |ecdsa_choices| list above */
 static const OPT_PAIR ecdh_choices[EC_NUM] = {
     {"ecdhp160", R_EC_P160},
@@ -462,13 +469,16 @@ static const OPT_PAIR ecdh_choices[EC_NUM] = {
     {"ecdhbrp384t1", R_EC_BRP384T1},
     {"ecdhbrp512r1", R_EC_BRP512R1},
     {"ecdhbrp512t1", R_EC_BRP512T1},
+#ifndef OPENSSL_NO_ECX
     {"ecdhx25519", R_EC_X25519},
     {"ecdhx448", R_EC_X448}
+#endif
 };
 
 static double ecdh_results[EC_NUM][1];      /* 1 op: derivation */
 static double ecdsa_results[ECDSA_NUM][2];  /* 2 ops: sign then verify */
 
+#ifndef OPENSSL_NO_ECX
 enum { R_EC_Ed25519, R_EC_Ed448, EdDSA_NUM };
 static const OPT_PAIR eddsa_choices[EdDSA_NUM] = {
     {"ed25519", R_EC_Ed25519},
@@ -476,6 +486,7 @@ static const OPT_PAIR eddsa_choices[EdDSA_NUM] = {
 
 };
 static double eddsa_results[EdDSA_NUM][2];    /* 2 ops: sign then verify */
+#endif /* OPENSSL_NO_ECX */
 
 #ifndef OPENSSL_NO_SM2
 enum { R_EC_CURVESM2, SM2_NUM };
@@ -517,8 +528,10 @@ typedef struct loopargs_st {
     EVP_PKEY_CTX *ecdsa_sign_ctx[ECDSA_NUM];
     EVP_PKEY_CTX *ecdsa_verify_ctx[ECDSA_NUM];
     EVP_PKEY_CTX *ecdh_ctx[EC_NUM];
+#ifndef OPENSSL_NO_ECX
     EVP_MD_CTX *eddsa_ctx[EdDSA_NUM];
     EVP_MD_CTX *eddsa_ctx2[EdDSA_NUM];
+#endif /* OPENSSL_NO_ECX */
 #ifndef OPENSSL_NO_SM2
     EVP_MD_CTX *sm2_ctx[SM2_NUM];
     EVP_MD_CTX *sm2_vfy_ctx[SM2_NUM];
@@ -553,9 +566,6 @@ static int run_benchmark(int async_jobs, int (*loop_function) (void *),
                          loopargs_t * loopargs);
 
 static unsigned int testnum;
-
-/* Nb of iterations to do per algorithm and key-size */
-static long c[ALGOR_NUM][SIZE_NUM];
 
 static char *evp_mac_mdname = "md5";
 static char *evp_hmac_name = NULL;
@@ -596,7 +606,7 @@ static int have_cipher(const char *name)
     return ret;
 }
 
-static int EVP_Digest_loop(const char *mdname, int algindex, void *args)
+static int EVP_Digest_loop(const char *mdname, ossl_unused int algindex, void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
     unsigned char *buf = tempargs->buf;
@@ -642,7 +652,7 @@ static int MD5_loop(void *args)
     return EVP_Digest_loop("md5", D_MD5, args);
 }
 
-static int EVP_MAC_loop(int algindex, void *args)
+static int EVP_MAC_loop(ossl_unused int algindex, void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
     unsigned char *buf = tempargs->buf;
@@ -891,8 +901,6 @@ static int EVP_Update_loop_aead(void *args)
     return realcount;
 }
 
-static long rsa_c[RSA_NUM][2];  /* # RSA iteration test */
-
 static int RSA_sign_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -937,7 +945,6 @@ static int RSA_verify_loop(void *args)
 }
 
 #ifndef OPENSSL_NO_DH
-static long ffdh_c[FFDH_NUM][1];
 
 static int FFDH_derive_key_loop(void *args)
 {
@@ -956,7 +963,6 @@ static int FFDH_derive_key_loop(void *args)
 }
 #endif /* OPENSSL_NO_DH */
 
-static long dsa_c[DSA_NUM][2];
 static int DSA_sign_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -1000,7 +1006,6 @@ static int DSA_verify_loop(void *args)
     return count;
 }
 
-static long ecdsa_c[ECDSA_NUM][2];
 static int ECDSA_sign_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -1046,7 +1051,6 @@ static int ECDSA_verify_loop(void *args)
 }
 
 /* ******************************************************************** */
-static long ecdh_c[EC_NUM][1];
 
 static int ECDH_EVP_derive_key_loop(void *args)
 {
@@ -1062,7 +1066,7 @@ static int ECDH_EVP_derive_key_loop(void *args)
     return count;
 }
 
-static long eddsa_c[EdDSA_NUM][2];
+#ifndef OPENSSL_NO_ECX
 static int EdDSA_sign_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -1104,9 +1108,9 @@ static int EdDSA_verify_loop(void *args)
     }
     return count;
 }
+#endif /* OPENSSL_NO_ECX */
 
 #ifndef OPENSSL_NO_SM2
-static long sm2_c[SM2_NUM][2];
 static int SM2_sign_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -1174,7 +1178,6 @@ static int SM2_verify_loop(void *args)
 }
 #endif                         /* OPENSSL_NO_SM2 */
 
-static long kems_c[MAX_KEM_NUM][3]; /* keygen, encaps, decaps */
 static int KEM_keygen_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -1232,7 +1235,6 @@ static int KEM_decaps_loop(void *args)
     return count;
 }
 
-static long sigs_c[MAX_SIG_NUM][3]; /* keygen, sign, verify */
 static int SIG_keygen_loop(void *args)
 {
     loopargs_t *tempargs = *(loopargs_t **) args;
@@ -1738,15 +1740,19 @@ int speed_main(int argc, char **argv)
         {"brainpoolP384t1", NID_brainpoolP384t1, 384},
         {"brainpoolP512r1", NID_brainpoolP512r1, 512},
         {"brainpoolP512t1", NID_brainpoolP512t1, 512},
+#ifndef OPENSSL_NO_ECX
         /* Other and ECDH only ones */
         {"X25519", NID_X25519, 253},
         {"X448", NID_X448, 448}
+#endif
     };
+#ifndef OPENSSL_NO_ECX
     static const EC_CURVE ed_curves[EdDSA_NUM] = {
         /* EdDSA */
         {"Ed25519", NID_ED25519, 253, 64},
         {"Ed448", NID_ED448, 456, 114}
     };
+#endif /* OPENSSL_NO_ECX */
 #ifndef OPENSSL_NO_SM2
     static const EC_CURVE sm2_curves[SM2_NUM] = {
         /* SM2 */
@@ -1756,7 +1762,9 @@ int speed_main(int argc, char **argv)
 #endif
     uint8_t ecdsa_doit[ECDSA_NUM] = { 0 };
     uint8_t ecdh_doit[EC_NUM] = { 0 };
+#ifndef OPENSSL_NO_ECX
     uint8_t eddsa_doit[EdDSA_NUM] = { 0 };
+#endif /* OPENSSL_NO_ECX */
 
     uint8_t kems_doit[MAX_KEM_NUM] = { 0 };
     uint8_t sigs_doit[MAX_SIG_NUM] = { 0 };
@@ -1765,6 +1773,7 @@ int speed_main(int argc, char **argv)
     uint8_t do_sigs = 0;
 
     /* checks declared curves against choices list. */
+#ifndef OPENSSL_NO_ECX
     OPENSSL_assert(ed_curves[EdDSA_NUM - 1].nid == NID_ED448);
     OPENSSL_assert(strcmp(eddsa_choices[EdDSA_NUM - 1].name, "ed448") == 0);
 
@@ -1773,6 +1782,7 @@ int speed_main(int argc, char **argv)
 
     OPENSSL_assert(ec_curves[ECDSA_NUM - 1].nid == NID_brainpoolP512t1);
     OPENSSL_assert(strcmp(ecdsa_choices[ECDSA_NUM - 1].name, "ecdsabrp512t1") == 0);
+#endif /* OPENSSL_NO_ECX */
 
 #ifndef OPENSSL_NO_SM2
     OPENSSL_assert(sm2_curves[SM2_NUM - 1].nid == NID_sm2);
@@ -2118,6 +2128,7 @@ int speed_main(int argc, char **argv)
                 algo_found = 1;
             }
         }
+#ifndef OPENSSL_NO_ECX
         if (strcmp(algo, "eddsa") == 0) {
             memset(eddsa_doit, 1, sizeof(eddsa_doit));
             algo_found = 1;
@@ -2126,6 +2137,7 @@ int speed_main(int argc, char **argv)
             eddsa_doit[i] = 2;
             algo_found = 1;
         }
+#endif /* OPENSSL_NO_ECX */
 #ifndef OPENSSL_NO_SM2
         if (strcmp(algo, "sm2") == 0) {
             memset(sm2_doit, 1, sizeof(sm2_doit));
@@ -2306,9 +2318,11 @@ int speed_main(int argc, char **argv)
         memset(ffdh_doit, 1, sizeof(ffdh_doit));
 #endif
         memset(dsa_doit, 1, sizeof(dsa_doit));
+#ifndef OPENSSL_NO_ECX
         memset(ecdsa_doit, 1, sizeof(ecdsa_doit));
         memset(ecdh_doit, 1, sizeof(ecdh_doit));
         memset(eddsa_doit, 1, sizeof(eddsa_doit));
+#endif /* OPENSSL_NO_ECX */
 #ifndef OPENSSL_NO_SM2
         memset(sm2_doit, 1, sizeof(sm2_doit));
 #endif
@@ -2332,8 +2346,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_MD2]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_MD2], c[D_MD2][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_MD2], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, EVP_Digest_MD2_loop, loopargs);
             d = Time_F(STOP);
@@ -2345,8 +2358,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_MDC2]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_MDC2], c[D_MDC2][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_MDC2], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, EVP_Digest_MDC2_loop, loopargs);
             d = Time_F(STOP);
@@ -2358,8 +2370,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_MD4]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_MD4], c[D_MD4][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_MD4], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, EVP_Digest_MD4_loop, loopargs);
             d = Time_F(STOP);
@@ -2371,8 +2382,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_MD5]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_MD5], c[D_MD5][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_MD5], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, MD5_loop, loopargs);
             d = Time_F(STOP);
@@ -2384,8 +2394,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_SHA1]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_SHA1], c[D_SHA1][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_SHA1], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, SHA1_loop, loopargs);
             d = Time_F(STOP);
@@ -2397,8 +2406,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_SHA256]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_SHA256], c[D_SHA256][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_SHA256], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, SHA256_loop, loopargs);
             d = Time_F(STOP);
@@ -2410,8 +2418,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_SHA512]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_SHA512], c[D_SHA512][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_SHA512], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, SHA512_loop, loopargs);
             d = Time_F(STOP);
@@ -2423,8 +2430,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_WHIRLPOOL]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_WHIRLPOOL], c[D_WHIRLPOOL][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_WHIRLPOOL], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, WHIRLPOOL_loop, loopargs);
             d = Time_F(STOP);
@@ -2436,8 +2442,7 @@ int speed_main(int argc, char **argv)
 
     if (doit[D_RMD160]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_RMD160], c[D_RMD160][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_RMD160], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, EVP_Digest_RMD160_loop, loopargs);
             d = Time_F(STOP);
@@ -2478,8 +2483,7 @@ int speed_main(int argc, char **argv)
                 goto skip_hmac; /* Digest not found */
         }
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_HMAC], c[D_HMAC][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_HMAC], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, HMAC_loop, loopargs);
             d = Time_F(STOP);
@@ -2503,8 +2507,7 @@ skip_hmac:
         }
         algindex = D_CBC_DES;
         for (testnum = 0; st && testnum < size_num; testnum++) {
-            print_message(names[D_CBC_DES], c[D_CBC_DES][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_CBC_DES], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, EVP_Cipher_loop, loopargs);
             d = Time_F(STOP);
@@ -2524,8 +2527,7 @@ skip_hmac:
         }
         algindex = D_EDE3_DES;
         for (testnum = 0; st && testnum < size_num; testnum++) {
-            print_message(names[D_EDE3_DES], c[D_EDE3_DES][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_EDE3_DES], lengths[testnum], seconds.sym);
             Time_F(START);
             count =
                 run_benchmark(async_jobs, EVP_Cipher_loop, loopargs);
@@ -2549,8 +2551,7 @@ skip_hmac:
             }
 
             for (testnum = 0; st && testnum < size_num; testnum++) {
-                print_message(names[algindex], c[algindex][testnum],
-                              lengths[testnum], seconds.sym);
+                print_message(names[algindex], lengths[testnum], seconds.sym);
                 Time_F(START);
                 count =
                     run_benchmark(async_jobs, EVP_Cipher_loop, loopargs);
@@ -2575,8 +2576,7 @@ skip_hmac:
             }
 
             for (testnum = 0; st && testnum < size_num; testnum++) {
-                print_message(names[algindex], c[algindex][testnum],
-                              lengths[testnum], seconds.sym);
+                print_message(names[algindex], lengths[testnum], seconds.sym);
                 Time_F(START);
                 count =
                     run_benchmark(async_jobs, EVP_Cipher_loop, loopargs);
@@ -2600,8 +2600,7 @@ skip_hmac:
             }
 
             for (testnum = 0; st && testnum < size_num; testnum++) {
-                print_message(names[algindex], c[algindex][testnum],
-                              lengths[testnum], seconds.sym);
+                print_message(names[algindex], lengths[testnum], seconds.sym);
                 Time_F(START);
                 count =
                     run_benchmark(async_jobs, EVP_Cipher_loop, loopargs);
@@ -2636,8 +2635,7 @@ skip_hmac:
                 goto end;
         }
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_GHASH], c[D_GHASH][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_GHASH], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, GHASH_loop, loopargs);
             d = Time_F(STOP);
@@ -2653,8 +2651,7 @@ skip_hmac:
 
     if (doit[D_RAND]) {
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_RAND], c[D_RAND][testnum], lengths[testnum],
-                          seconds.sym);
+            print_message(names[D_RAND], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, RAND_bytes_loop, loopargs);
             d = Time_F(STOP);
@@ -2687,8 +2684,7 @@ skip_hmac:
             }
 
             for (testnum = 0; testnum < size_num; testnum++) {
-                print_message(names[D_EVP], c[D_EVP][testnum], lengths[testnum],
-                              seconds.sym);
+                print_message(names[D_EVP], lengths[testnum], seconds.sym);
 
                 for (k = 0; k < loopargs_len; k++) {
                     loopargs[k].ctx = EVP_CIPHER_CTX_new();
@@ -2734,8 +2730,7 @@ skip_hmac:
             names[D_EVP] = evp_md_name;
 
             for (testnum = 0; testnum < size_num; testnum++) {
-                print_message(names[D_EVP], c[D_EVP][testnum], lengths[testnum],
-                              seconds.sym);
+                print_message(names[D_EVP], lengths[testnum], seconds.sym);
                 Time_F(START);
                 count = run_benchmark(async_jobs, EVP_Digest_md_loop, loopargs);
                 d = Time_F(STOP);
@@ -2783,8 +2778,7 @@ skip_hmac:
         }
 
         for (testnum = 0; testnum < size_num; testnum++) {
-            print_message(names[D_EVP_CMAC], c[D_EVP_CMAC][testnum],
-                          lengths[testnum], seconds.sym);
+            print_message(names[D_EVP_CMAC], lengths[testnum], seconds.sym);
             Time_F(START);
             count = run_benchmark(async_jobs, CMAC_loop, loopargs);
             d = Time_F(STOP);
@@ -2848,8 +2842,7 @@ skip_hmac:
             op_count = 1;
         } else {
             pkey_print_message("private", "rsa",
-                               rsa_c[testnum][0], rsa_keys[testnum].bits,
-                               seconds.rsa);
+                               rsa_keys[testnum].bits, seconds.rsa);
             /* RSA_blinding_on(rsa_key[testnum],NULL); */
             Time_F(START);
             count = run_benchmark(async_jobs, RSA_sign_loop, loopargs);
@@ -2880,8 +2873,7 @@ skip_hmac:
             rsa_doit[testnum] = 0;
         } else {
             pkey_print_message("public", "rsa",
-                               rsa_c[testnum][1], rsa_keys[testnum].bits,
-                               seconds.rsa);
+                               rsa_keys[testnum].bits, seconds.rsa);
             Time_F(START);
             count = run_benchmark(async_jobs, RSA_verify_loop, loopargs);
             d = Time_F(STOP);
@@ -2928,8 +2920,7 @@ skip_hmac:
             op_count = 1;
         } else {
             pkey_print_message("sign", "dsa",
-                               dsa_c[testnum][0], dsa_bits[testnum],
-                               seconds.dsa);
+                               dsa_bits[testnum], seconds.dsa);
             Time_F(START);
             count = run_benchmark(async_jobs, DSA_sign_loop, loopargs);
             d = Time_F(STOP);
@@ -2959,8 +2950,7 @@ skip_hmac:
             dsa_doit[testnum] = 0;
         } else {
             pkey_print_message("verify", "dsa",
-                               dsa_c[testnum][1], dsa_bits[testnum],
-                               seconds.dsa);
+                               dsa_bits[testnum], seconds.dsa);
             Time_F(START);
             count = run_benchmark(async_jobs, DSA_verify_loop, loopargs);
             d = Time_F(STOP);
@@ -3007,8 +2997,7 @@ skip_hmac:
             op_count = 1;
         } else {
             pkey_print_message("sign", "ecdsa",
-                               ecdsa_c[testnum][0], ec_curves[testnum].bits,
-                               seconds.ecdsa);
+                               ec_curves[testnum].bits, seconds.ecdsa);
             Time_F(START);
             count = run_benchmark(async_jobs, ECDSA_sign_loop, loopargs);
             d = Time_F(STOP);
@@ -3038,8 +3027,7 @@ skip_hmac:
             ecdsa_doit[testnum] = 0;
         } else {
             pkey_print_message("verify", "ecdsa",
-                               ecdsa_c[testnum][1], ec_curves[testnum].bits,
-                               seconds.ecdsa);
+                               ec_curves[testnum].bits, seconds.ecdsa);
             Time_F(START);
             count = run_benchmark(async_jobs, ECDSA_verify_loop, loopargs);
             d = Time_F(STOP);
@@ -3125,7 +3113,6 @@ skip_hmac:
         }
         if (ecdh_checks != 0) {
             pkey_print_message("", "ecdh",
-                               ecdh_c[testnum][0],
                                ec_curves[testnum].bits, seconds.ecdh);
             Time_F(START);
             count =
@@ -3145,6 +3132,7 @@ skip_hmac:
         }
     }
 
+#ifndef OPENSSL_NO_ECX
     for (testnum = 0; testnum < EdDSA_NUM; testnum++) {
         int st = 1;
         EVP_PKEY *ed_pkey = NULL;
@@ -3211,7 +3199,6 @@ skip_hmac:
                 op_count = 1;
             } else {
                 pkey_print_message("sign", ed_curves[testnum].name,
-                                   eddsa_c[testnum][0],
                                    ed_curves[testnum].bits, seconds.eddsa);
                 Time_F(START);
                 count = run_benchmark(async_jobs, EdDSA_sign_loop, loopargs);
@@ -3240,7 +3227,6 @@ skip_hmac:
                 eddsa_doit[testnum] = 0;
             } else {
                 pkey_print_message("verify", ed_curves[testnum].name,
-                                   eddsa_c[testnum][1],
                                    ed_curves[testnum].bits, seconds.eddsa);
                 Time_F(START);
                 count = run_benchmark(async_jobs, EdDSA_verify_loop, loopargs);
@@ -3259,6 +3245,7 @@ skip_hmac:
             }
         }
     }
+#endif /* OPENSSL_NO_ECX */
 
 #ifndef OPENSSL_NO_SM2
     for (testnum = 0; testnum < SM2_NUM; testnum++) {
@@ -3343,7 +3330,6 @@ skip_hmac:
                 op_count = 1;
             } else {
                 pkey_print_message("sign", sm2_curves[testnum].name,
-                                   sm2_c[testnum][0],
                                    sm2_curves[testnum].bits, seconds.sm2);
                 Time_F(START);
                 count = run_benchmark(async_jobs, SM2_sign_loop, loopargs);
@@ -3373,7 +3359,6 @@ skip_hmac:
                 sm2_doit[testnum] = 0;
             } else {
                 pkey_print_message("verify", sm2_curves[testnum].name,
-                                   sm2_c[testnum][1],
                                    sm2_curves[testnum].bits, seconds.sm2);
                 Time_F(START);
                 count = run_benchmark(async_jobs, SM2_verify_loop, loopargs);
@@ -3558,7 +3543,7 @@ skip_hmac:
             test_ctx = NULL;
         }
         if (ffdh_checks != 0) {
-            pkey_print_message("", "ffdh", ffdh_c[testnum][0],
+            pkey_print_message("", "ffdh",
                                ffdh_params[testnum].bits, seconds.ffdh);
             Time_F(START);
             count =
@@ -3593,13 +3578,16 @@ skip_hmac:
             size_t send_secret_len, out_len;
             size_t rcv_secret_len;
             unsigned char *out = NULL, *send_secret = NULL, *rcv_secret;
-            size_t bits;
+            unsigned int bits;
             char *name;
+            char sfx[MAX_ALGNAME_SUFFIX];
             OSSL_PARAM params[] = { OSSL_PARAM_END, OSSL_PARAM_END };
             int use_params = 0;
             enum kem_type_t { KEM_RSA = 1, KEM_EC, KEM_X25519, KEM_X448 } kem_type;
 
-            if (strncmp(kem_name, "rsa", 3) == 0)
+            /* no string after rsa<bitcnt> permitted: */
+            if (strlen(kem_name) < MAX_ALGNAME_SUFFIX + 4 /* rsa+digit */
+                && sscanf(kem_name, "rsa%u%s", &bits, sfx) == 1)
                 kem_type = KEM_RSA;
             else if (strncmp(kem_name, "EC", 2) == 0)
                 kem_type = KEM_EC;
@@ -3616,9 +3604,8 @@ skip_hmac:
             }
 
             if (kem_type == KEM_RSA) {
-                bits = atoi(kem_name + 3);
-                params[0] = OSSL_PARAM_construct_size_t(OSSL_PKEY_PARAM_RSA_BITS,
-                                                        &bits);
+                params[0] = OSSL_PARAM_construct_uint(OSSL_PKEY_PARAM_RSA_BITS,
+                                                      &bits);
                 use_params = 1;
             } else if (kem_type == KEM_EC) {
                 name = (char *)(kem_name + 2);
@@ -3723,8 +3710,7 @@ skip_hmac:
             break;
         }
         if (kem_checks != 0) {
-            kskey_print_message(kem_name, "keygen", kems_c[testnum][0],
-                                seconds.kem);
+            kskey_print_message(kem_name, "keygen", seconds.kem);
             Time_F(START);
             count =
                 run_benchmark(async_jobs, KEM_keygen_loop, loopargs);
@@ -3735,8 +3721,7 @@ skip_hmac:
                        kem_name, d);
             kems_results[testnum][0] = (double)count / d;
             op_count = count;
-            kskey_print_message(kem_name, "encaps", kems_c[testnum][1],
-                                seconds.kem);
+            kskey_print_message(kem_name, "encaps", seconds.kem);
             Time_F(START);
             count =
                 run_benchmark(async_jobs, KEM_encaps_loop, loopargs);
@@ -3747,8 +3732,7 @@ skip_hmac:
                        kem_name, d);
             kems_results[testnum][1] = (double)count / d;
             op_count = count;
-            kskey_print_message(kem_name, "decaps", kems_c[testnum][2],
-                                seconds.kem);
+            kskey_print_message(kem_name, "decaps", seconds.kem);
             Time_F(START);
             count =
                 run_benchmark(async_jobs, KEM_decaps_loop, loopargs);
@@ -3782,9 +3766,10 @@ skip_hmac:
             EVP_PKEY_CTX *sig_verify_ctx = NULL;
             unsigned char md[SHA256_DIGEST_LENGTH];
             unsigned char *sig;
+            char sfx[MAX_ALGNAME_SUFFIX];
             size_t md_len = SHA256_DIGEST_LENGTH;
             size_t max_sig_len, sig_len;
-            size_t bits;
+            unsigned int bits;
             OSSL_PARAM params[] = { OSSL_PARAM_END, OSSL_PARAM_END };
             int use_params = 0;
 
@@ -3797,10 +3782,11 @@ skip_hmac:
                 ERR_print_errors(bio_err);
             }
 
-            if (strncmp(sig_name, "rsa", 3) == 0) {
-                bits = atoi(sig_name + 3);
-                params[0] = OSSL_PARAM_construct_size_t(OSSL_PKEY_PARAM_RSA_BITS,
-                                                        &bits);
+            /* no string after rsa<bitcnt> permitted: */
+            if (strlen(sig_name) < MAX_ALGNAME_SUFFIX + 4 /* rsa+digit */
+                && sscanf(sig_name, "rsa%u%s", &bits, sfx) == 1) {
+                params[0] = OSSL_PARAM_construct_uint(OSSL_PKEY_PARAM_RSA_BITS,
+                                                      &bits);
                 use_params = 1;
             }
 
@@ -3822,7 +3808,7 @@ skip_hmac:
 
             if (sig_gen_ctx == NULL)
                 sig_gen_ctx = EVP_PKEY_CTX_new_from_name(app_get0_libctx(),
-                                      (strncmp(sig_name, "rsa", 3) == 0) ? "RSA" : sig_name,
+                                      use_params == 1 ? "RSA" : sig_name,
                                       app_get0_propq());
 
             if (!sig_gen_ctx || EVP_PKEY_keygen_init(sig_gen_ctx) <= 0
@@ -3844,7 +3830,7 @@ skip_hmac:
                                                       app_get0_propq());
             if (sig_sign_ctx == NULL
                 || EVP_PKEY_sign_init(sig_sign_ctx) <= 0
-                || (strncmp(sig_name, "rsa", 3) == 0
+                || (use_params == 1
                     && (EVP_PKEY_CTX_set_rsa_padding(sig_sign_ctx,
                                                      RSA_PKCS1_PADDING) <= 0))
                 || EVP_PKEY_sign(sig_sign_ctx, NULL, &max_sig_len,
@@ -3870,7 +3856,7 @@ skip_hmac:
                                                         app_get0_propq());
             if (sig_verify_ctx == NULL
                 || EVP_PKEY_verify_init(sig_verify_ctx) <= 0
-                || (strncmp(sig_name, "rsa", 3) == 0
+                || (use_params == 1
                   && (EVP_PKEY_CTX_set_rsa_padding(sig_verify_ctx,
                                                    RSA_PKCS1_PADDING) <= 0))) {
                 BIO_printf(bio_err,
@@ -3902,7 +3888,7 @@ skip_hmac:
         }
 
         if (sig_checks != 0) {
-            kskey_print_message(sig_name, "keygen", sigs_c[testnum][0], seconds.sig);
+            kskey_print_message(sig_name, "keygen", seconds.sig);
             Time_F(START);
             count = run_benchmark(async_jobs, SIG_keygen_loop, loopargs);
             d = Time_F(STOP);
@@ -3912,8 +3898,7 @@ skip_hmac:
                        sig_name, d);
             sigs_results[testnum][0] = (double)count / d;
             op_count = count;
-            kskey_print_message(sig_name, "signs", sigs_c[testnum][1],
-                                 seconds.sig);
+            kskey_print_message(sig_name, "signs", seconds.sig);
             Time_F(START);
             count =
                 run_benchmark(async_jobs, SIG_sign_loop, loopargs);
@@ -3925,8 +3910,7 @@ skip_hmac:
             sigs_results[testnum][1] = (double)count / d;
             op_count = count;
 
-            kskey_print_message(sig_name, "verify", sigs_c[testnum][2],
-                                 seconds.sig);
+            kskey_print_message(sig_name, "verify", seconds.sig);
             Time_F(START);
             count =
                 run_benchmark(async_jobs, SIG_verify_loop, loopargs);
@@ -4052,6 +4036,7 @@ skip_hmac:
                    1.0 / ecdh_results[k][0], ecdh_results[k][0]);
     }
 
+#ifndef OPENSSL_NO_ECX
     testnum = 1;
     for (k = 0; k < OSSL_NELEM(eddsa_doit); k++) {
         if (!eddsa_doit[k])
@@ -4071,6 +4056,7 @@ skip_hmac:
                    1.0 / eddsa_results[k][0], 1.0 / eddsa_results[k][1],
                    eddsa_results[k][0], eddsa_results[k][1]);
     }
+#endif /* OPENSSL_NO_ECX */
 
 #ifndef OPENSSL_NO_SM2
     testnum = 1;
@@ -4186,10 +4172,12 @@ skip_hmac:
         }
         for (k = 0; k < EC_NUM; k++)
             EVP_PKEY_CTX_free(loopargs[i].ecdh_ctx[k]);
+#ifndef OPENSSL_NO_ECX
         for (k = 0; k < EdDSA_NUM; k++) {
             EVP_MD_CTX_free(loopargs[i].eddsa_ctx[k]);
             EVP_MD_CTX_free(loopargs[i].eddsa_ctx2[k]);
         }
+#endif /* OPENSSL_NO_ECX */
 #ifndef OPENSSL_NO_SM2
         for (k = 0; k < SM2_NUM; k++) {
             EVP_PKEY_CTX *pctx = NULL;
@@ -4248,7 +4236,7 @@ skip_hmac:
     return ret;
 }
 
-static void print_message(const char *s, long num, int length, int tm)
+static void print_message(const char *s, int length, int tm)
 {
     BIO_printf(bio_err,
                mr ? "+DT:%s:%d:%d\n"
@@ -4258,8 +4246,8 @@ static void print_message(const char *s, long num, int length, int tm)
     alarm(tm);
 }
 
-static void pkey_print_message(const char *str, const char *str2, long num,
-                               unsigned int bits, int tm)
+static void pkey_print_message(const char *str, const char *str2, unsigned int bits,
+                               int tm)
 {
     BIO_printf(bio_err,
                mr ? "+DTP:%d:%s:%s:%d\n"
@@ -4269,8 +4257,7 @@ static void pkey_print_message(const char *str, const char *str2, long num,
     alarm(tm);
 }
 
-static void kskey_print_message(const char *str, const char *str2,
-                                long num, int tm)
+static void kskey_print_message(const char *str, const char *str2, int tm)
 {
     BIO_printf(bio_err,
                mr ? "+DTP:%s:%s:%d\n"
@@ -4447,6 +4434,7 @@ static int do_multi(int multi, int size_num)
                     d = atof(sstrsep(&p, sep));
                     ecdh_results[k][0] += d;
                 }
+# ifndef OPENSSL_NO_ECX
             } else if (CHECK_AND_SKIP_PREFIX(p, "+F6:")) {
                 tk = sstrsep(&p, sep);
                 if (strtoint(tk, 0, OSSL_NELEM(eddsa_results), &k)) {
@@ -4459,6 +4447,7 @@ static int do_multi(int multi, int size_num)
                     d = atof(sstrsep(&p, sep));
                     eddsa_results[k][1] += d;
                 }
+# endif /* OPENSSL_NO_ECX */
 # ifndef OPENSSL_NO_SM2
             } else if (CHECK_AND_SKIP_PREFIX(p, "+F7:")) {
                 tk = sstrsep(&p, sep);
@@ -4576,7 +4565,7 @@ static void multiblock_speed(const EVP_CIPHER *evp_cipher, int lengths_single,
         app_bail_out("failed to get cipher name\n");
 
     for (j = 0; j < num; j++) {
-        print_message(alg_name, 0, mblengths[j], seconds->sym);
+        print_message(alg_name, mblengths[j], seconds->sym);
         Time_F(START);
         for (count = 0; run && count < INT_MAX; count++) {
             unsigned char aad[EVP_AEAD_TLS1_AAD_LEN];

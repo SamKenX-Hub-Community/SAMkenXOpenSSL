@@ -47,6 +47,7 @@ struct helper {
     BIO                             *bio1, *bio2;
     QUIC_TXFC                       conn_txfc;
     QUIC_RXFC                       conn_rxfc, stream_rxfc;
+    QUIC_RXFC                       max_streams_bidi_rxfc, max_streams_uni_rxfc;
     OSSL_STATM                      statm;
     OSSL_CC_DATA                    *cc_data;
     const OSSL_CC_METHOD            *cc_method;
@@ -147,13 +148,24 @@ static int helper_init(struct helper *h)
                                        NULL)))
         goto err;
 
+    if (!TEST_true(ossl_quic_rxfc_init(&h->max_streams_bidi_rxfc, NULL,
+                                       100, 100,
+                                       fake_now,
+                                       NULL)))
+        goto err;
+
+    if (!TEST_true(ossl_quic_rxfc_init(&h->max_streams_uni_rxfc, NULL,
+                                       100, 100,
+                                       fake_now,
+                                       NULL)))
+
     if (!TEST_true(ossl_statm_init(&h->statm)))
         goto err;
 
     h->have_statm = 1;
 
     h->cc_method = &ossl_cc_dummy_method;
-    if (!TEST_ptr(h->cc_data = h->cc_method->new(NULL, NULL, NULL)))
+    if (!TEST_ptr(h->cc_data = h->cc_method->new(fake_now, NULL)))
         goto err;
 
     if (!TEST_ptr(h->args.ackm = ossl_ackm_new(fake_now, NULL,
@@ -162,7 +174,10 @@ static int helper_init(struct helper *h)
                                                h->cc_data)))
         goto err;
 
-    if (!TEST_true(ossl_quic_stream_map_init(&h->qsm, NULL, NULL)))
+    if (!TEST_true(ossl_quic_stream_map_init(&h->qsm, NULL, NULL,
+                                             &h->max_streams_bidi_rxfc,
+                                             &h->max_streams_uni_rxfc,
+                                             /*is_server=*/0)))
         goto err;
 
     h->have_qsm = 1;
@@ -171,14 +186,16 @@ static int helper_init(struct helper *h)
         if (!TEST_ptr(h->args.crypto[i] = ossl_quic_sstream_new(4096)))
             goto err;
 
-    h->args.cur_scid   = scid_1;
-    h->args.cur_dcid   = dcid_1;
-    h->args.qsm        = &h->qsm;
-    h->args.conn_txfc  = &h->conn_txfc;
-    h->args.conn_rxfc  = &h->conn_rxfc;
-    h->args.cc_method  = h->cc_method;
-    h->args.cc_data    = h->cc_data;
-    h->args.now        = fake_now;
+    h->args.cur_scid                = scid_1;
+    h->args.cur_dcid                = dcid_1;
+    h->args.qsm                     = &h->qsm;
+    h->args.conn_txfc               = &h->conn_txfc;
+    h->args.conn_rxfc               = &h->conn_rxfc;
+    h->args.max_streams_bidi_rxfc   = &h->max_streams_bidi_rxfc;
+    h->args.max_streams_uni_rxfc    = &h->max_streams_uni_rxfc;
+    h->args.cc_method               = h->cc_method;
+    h->args.cc_data                 = h->cc_data;
+    h->args.now                     = fake_now;
 
     if (!TEST_ptr(h->txp = ossl_quic_tx_packetiser_new(&h->args)))
         goto err;
@@ -375,12 +392,11 @@ static int schedule_cfq_new_conn_id(struct helper *h)
     QUIC_CFQ_ITEM *cfq_item;
     WPACKET wpkt;
     BUF_MEM *buf_mem = NULL;
-    char have_wpkt = 0;
     size_t l = 0;
     OSSL_QUIC_FRAME_NEW_CONN_ID ncid = {0};
 
-    ncid.seq_num         = 1234;
-    ncid.retire_prior_to = 2345;
+    ncid.seq_num         = 2345;
+    ncid.retire_prior_to = 1234;
     ncid.conn_id         = cid_1;
     memcpy(ncid.stateless_reset_token, reset_token_1, sizeof(reset_token_1));
 
@@ -390,9 +406,12 @@ static int schedule_cfq_new_conn_id(struct helper *h)
     if (!TEST_true(WPACKET_init(&wpkt, buf_mem)))
         goto err;
 
-    have_wpkt = 1;
-    if (!TEST_true(ossl_quic_wire_encode_frame_new_conn_id(&wpkt, &ncid)))
+    if (!TEST_true(ossl_quic_wire_encode_frame_new_conn_id(&wpkt, &ncid))) {
+        WPACKET_cleanup(&wpkt);
         goto err;
+    }
+
+    WPACKET_finish(&wpkt);
 
     if (!TEST_true(WPACKET_get_total_written(&wpkt, &l)))
         goto err;
@@ -407,15 +426,15 @@ static int schedule_cfq_new_conn_id(struct helper *h)
 
     rc = 1;
 err:
-    if (have_wpkt)
-        WPACKET_cleanup(&wpkt);
+    if (!rc)
+        BUF_MEM_free(buf_mem);
     return rc;
 }
 
 static int check_cfq_new_conn_id(struct helper *h)
 {
-    if (!TEST_uint64_t_eq(h->frame.new_conn_id.seq_num, 1234)
-        || !TEST_uint64_t_eq(h->frame.new_conn_id.retire_prior_to, 2345)
+    if (!TEST_uint64_t_eq(h->frame.new_conn_id.seq_num, 2345)
+        || !TEST_uint64_t_eq(h->frame.new_conn_id.retire_prior_to, 1234)
         || !TEST_mem_eq(&h->frame.new_conn_id.conn_id, sizeof(cid_1),
                         &cid_1, sizeof(cid_1))
         || !TEST_mem_eq(&h->frame.new_conn_id.stateless_reset_token,
@@ -454,7 +473,6 @@ static int schedule_cfq_new_token(struct helper *h)
     QUIC_CFQ_ITEM *cfq_item;
     WPACKET wpkt;
     BUF_MEM *buf_mem = NULL;
-    char have_wpkt = 0;
     size_t l = 0;
 
     if (!TEST_ptr(buf_mem = BUF_MEM_new()))
@@ -463,10 +481,13 @@ static int schedule_cfq_new_token(struct helper *h)
     if (!TEST_true(WPACKET_init(&wpkt, buf_mem)))
         goto err;
 
-    have_wpkt = 1;
     if (!TEST_true(ossl_quic_wire_encode_frame_new_token(&wpkt, token_1,
-                                                         sizeof(token_1))))
+                                                         sizeof(token_1)))) {
+        WPACKET_cleanup(&wpkt);
         goto err;
+    }
+
+    WPACKET_finish(&wpkt);
 
     if (!TEST_true(WPACKET_get_total_written(&wpkt, &l)))
         goto err;
@@ -481,8 +502,8 @@ static int schedule_cfq_new_token(struct helper *h)
 
     rc = 1;
 err:
-    if (have_wpkt)
-        WPACKET_cleanup(&wpkt);
+    if (!rc)
+        BUF_MEM_free(buf_mem);
     return rc;
 }
 
@@ -1206,7 +1227,8 @@ static void skip_padding(struct helper *h)
 
 static int run_script(const struct script_op *script)
 {
-    int testresult = 0, have_helper = 0, sent_ack_eliciting = 0;
+    int testresult = 0, have_helper = 0;
+    QUIC_TXP_STATUS status;
     struct helper h;
     const struct script_op *op;
 
@@ -1218,7 +1240,7 @@ static int run_script(const struct script_op *script)
         switch (op->opcode) {
         case OPK_TXP_GENERATE:
             if (!TEST_int_eq(ossl_quic_tx_packetiser_generate(h.txp, (int)op->arg0,
-                                                              &sent_ack_eliciting),
+                                                              &status),
                              TX_PACKETISER_RES_SENT_PKT))
                 goto err;
 
@@ -1227,7 +1249,7 @@ static int run_script(const struct script_op *script)
             break;
         case OPK_TXP_GENERATE_NONE:
             if (!TEST_int_eq(ossl_quic_tx_packetiser_generate(h.txp, (int)op->arg0,
-                                                              &sent_ack_eliciting),
+                                                              &status),
                              TX_PACKETISER_RES_NO_PKT))
                 goto err;
 
@@ -1316,7 +1338,7 @@ static int run_script(const struct script_op *script)
                     goto err;
                 break;
             case OSSL_QUIC_FRAME_TYPE_CRYPTO:
-                if (!TEST_true(ossl_quic_wire_decode_frame_crypto(&h.pkt, &h.frame.crypto)))
+                if (!TEST_true(ossl_quic_wire_decode_frame_crypto(&h.pkt, 0, &h.frame.crypto)))
                     goto err;
                 break;
 
@@ -1328,7 +1350,7 @@ static int run_script(const struct script_op *script)
             case OSSL_QUIC_FRAME_TYPE_STREAM_OFF_FIN:
             case OSSL_QUIC_FRAME_TYPE_STREAM_OFF_LEN:
             case OSSL_QUIC_FRAME_TYPE_STREAM_OFF_LEN_FIN:
-                if (!TEST_true(ossl_quic_wire_decode_frame_stream(&h.pkt, &h.frame.stream)))
+                if (!TEST_true(ossl_quic_wire_decode_frame_stream(&h.pkt, 0, &h.frame.stream)))
                     goto err;
                 break;
 
@@ -1454,7 +1476,8 @@ static int run_script(const struct script_op *script)
                                                                  op->arg0)))
                     goto err;
 
-                if (!TEST_true(ossl_quic_stream_stop_sending(s, op->arg1)))
+                if (!TEST_true(ossl_quic_stream_map_stop_sending_recv_part(h.args.qsm,
+                                                                           s, op->arg1)))
                     goto err;
 
                 ossl_quic_stream_map_update_state(h.args.qsm, s);
@@ -1471,7 +1494,8 @@ static int run_script(const struct script_op *script)
                                                                  op->arg0)))
                     goto err;
 
-                if (!TEST_true(ossl_quic_stream_reset(s, op->arg1)))
+                if (!TEST_true(ossl_quic_stream_map_reset_stream_send_part(h.args.qsm,
+                                                                           s, op->arg1)))
                     goto err;
 
                 ossl_quic_stream_map_update_state(h.args.qsm, s);

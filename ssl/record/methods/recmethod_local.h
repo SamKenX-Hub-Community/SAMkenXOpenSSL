@@ -255,7 +255,7 @@ struct ossl_record_layer_st
     /* each decoded record goes in here */
     TLS_RL_RECORD rrec[SSL_MAX_PIPELINES];
 
-    /* How many records have we got available in the rrec bufer */
+    /* How many records have we got available in the rrec buffer */
     size_t num_recs;
 
     /* The record number in the rrec buffer that can be read next */
@@ -313,7 +313,7 @@ struct ossl_record_layer_st
      */
     unsigned int max_frag_len;
 
-    /* The maxium amount of early data we can receive/send */
+    /* The maximum amount of early data we can receive/send */
     uint32_t max_early_data;
 
     /* The amount of early data that we have sent/received */
@@ -355,7 +355,7 @@ struct ossl_record_layer_st
     DTLS_BITMAP next_bitmap;
 
     /*
-     * Whether we are currently in a hanshake or not. Only maintained for DTLS
+     * Whether we are currently in a handshake or not. Only maintained for DTLS
      */
     int in_init;
 
@@ -459,9 +459,9 @@ int tls_retry_write_records(OSSL_RECORD_LAYER *rl);
 int tls_get_alert_code(OSSL_RECORD_LAYER *rl);
 int tls_set1_bio(OSSL_RECORD_LAYER *rl, BIO *bio);
 int tls_read_record(OSSL_RECORD_LAYER *rl, void **rechandle, int *rversion,
-                    int *type, unsigned char **data, size_t *datalen,
+                    int *type, const unsigned char **data, size_t *datalen,
                     uint16_t *epoch, unsigned char *seq_num);
-int tls_release_record(OSSL_RECORD_LAYER *rl, void *rechandle);
+int tls_release_record(OSSL_RECORD_LAYER *rl, void *rechandle, size_t length);
 int tls_default_set_protocol_version(OSSL_RECORD_LAYER *rl, int version);
 int tls_set_protocol_version(OSSL_RECORD_LAYER *rl, int version);
 void tls_set_plain_alerts(OSSL_RECORD_LAYER *rl, int allow);

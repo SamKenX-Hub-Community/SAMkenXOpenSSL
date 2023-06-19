@@ -872,7 +872,7 @@ DSA *EVP_PKEY_get1_DSA(EVP_PKEY *pkey)
 }
 # endif /*  OPENSSL_NO_DSA */
 
-# ifndef OPENSSL_NO_EC
+# ifndef OPENSSL_NO_ECX
 static const ECX_KEY *evp_pkey_get0_ECX_KEY(const EVP_PKEY *pkey, int type)
 {
     if (EVP_PKEY_get_base_id(pkey) != type) {
@@ -901,7 +901,7 @@ IMPLEMENT_ECX_VARIANT(X448)
 IMPLEMENT_ECX_VARIANT(ED25519)
 IMPLEMENT_ECX_VARIANT(ED448)
 
-# endif
+# endif /* OPENSSL_NO_ECX */
 
 # if !defined(OPENSSL_NO_DH) && !defined(OPENSSL_NO_DEPRECATED_3_0)
 
@@ -1757,7 +1757,7 @@ void evp_pkey_free_legacy(EVP_PKEY *x)
 static void evp_pkey_free_it(EVP_PKEY *x)
 {
     /* internal function; x is never NULL */
-    evp_keymgmt_util_clear_operation_cache(x, 1);
+    evp_keymgmt_util_clear_operation_cache(x);
 #ifndef FIPS_MODULE
     evp_pkey_free_legacy(x);
 #endif
@@ -1936,7 +1936,7 @@ void *evp_pkey_export_to_provider(EVP_PKEY *pk, OSSL_LIB_CTX *libctx,
         if (!CRYPTO_THREAD_write_lock(pk->lock))
             goto end;
         if (pk->ameth->dirty_cnt(pk) != pk->dirty_cnt_copy
-                && !evp_keymgmt_util_clear_operation_cache(pk, 0)) {
+                && !evp_keymgmt_util_clear_operation_cache(pk)) {
             CRYPTO_THREAD_unlock(pk->lock);
             evp_keymgmt_freedata(tmp_keymgmt, keydata);
             keydata = NULL;
@@ -2176,7 +2176,14 @@ int EVP_PKEY_get_bn_param(const EVP_PKEY *pkey, const char *key_name,
         goto err;
     ret = OSSL_PARAM_get_BN(params, bn);
 err:
-    OPENSSL_free(buf);
+    if (buf != NULL) {
+        if (OSSL_PARAM_modified(params))
+            OPENSSL_clear_free(buf, buf_sz);
+        else
+            OPENSSL_free(buf);
+    } else if (OSSL_PARAM_modified(params)) {
+        OPENSSL_cleanse(buffer, params[0].data_size);
+    }
     return ret;
 }
 

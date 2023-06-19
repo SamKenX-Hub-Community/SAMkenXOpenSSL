@@ -163,11 +163,13 @@ int OSSL_CMP_CTX_reinit(OSSL_CMP_CTX *ctx)
         return 0;
     }
 
+#ifndef OPENSSL_NO_HTTP
     if (ctx->http_ctx != NULL) {
         (void)OSSL_HTTP_close(ctx->http_ctx, 1);
         ossl_cmp_debug(ctx, "disconnected from CMP server");
         ctx->http_ctx = NULL;
     }
+#endif
     ctx->status = OSSL_CMP_PKISTATUS_unspecified;
     ctx->failInfoCode = -1;
 
@@ -191,10 +193,12 @@ void OSSL_CMP_CTX_free(OSSL_CMP_CTX *ctx)
     if (ctx == NULL)
         return;
 
+#ifndef OPENSSL_NO_HTTP
     if (ctx->http_ctx != NULL) {
         (void)OSSL_HTTP_close(ctx->http_ctx, 1);
         ossl_cmp_debug(ctx, "disconnected from CMP server");
     }
+#endif
     OPENSSL_free(ctx->propq);
     OPENSSL_free(ctx->serverPath);
     OPENSSL_free(ctx->server);
@@ -755,6 +759,7 @@ int OSSL_CMP_CTX_set0_newPkey(OSSL_CMP_CTX *ctx, int priv, EVP_PKEY *pkey)
 }
 
 /* Get the private/public key to use for cert enrollment, or NULL on error */
+/* In case |priv| == 0, better use ossl_cmp_ctx_get0_newPubkey() below */
 EVP_PKEY *OSSL_CMP_CTX_get0_newPkey(const OSSL_CMP_CTX *ctx, int priv)
 {
     if (ctx == NULL) {
@@ -767,6 +772,21 @@ EVP_PKEY *OSSL_CMP_CTX_get0_newPkey(const OSSL_CMP_CTX *ctx, int priv)
     if (ctx->p10CSR != NULL)
         return priv ? NULL : X509_REQ_get0_pubkey(ctx->p10CSR);
     return ctx->pkey; /* may be NULL */
+}
+
+EVP_PKEY *ossl_cmp_ctx_get0_newPubkey(const OSSL_CMP_CTX *ctx)
+{
+    if (!ossl_assert(ctx != NULL))
+        return NULL;
+    if (ctx->newPkey != NULL)
+        return ctx->newPkey;
+    if (ctx->p10CSR != NULL)
+        return X509_REQ_get0_pubkey(ctx->p10CSR);
+    if (ctx->oldCert != NULL)
+        return X509_get0_pubkey(ctx->oldCert);
+    if (ctx->cert != NULL)
+        return X509_get0_pubkey(ctx->cert);
+    return ctx->pkey;
 }
 
 #define DEFINE_set1_ASN1_OCTET_STRING(PREFIX, FIELD) \
@@ -797,6 +817,7 @@ DEFINE_OSSL_CMP_CTX_set1(server, char)
 /* Set the server exclusion list of the HTTP proxy server */
 DEFINE_OSSL_CMP_CTX_set1(no_proxy, char)
 
+#ifndef OPENSSL_NO_HTTP
 /* Set the http connect/disconnect callback function to be used for HTTP(S) */
 DEFINE_OSSL_set(OSSL_CMP_CTX, http_cb, OSSL_HTTP_bio_cb_t)
 
@@ -808,6 +829,7 @@ DEFINE_OSSL_set(OSSL_CMP_CTX, http_cb_arg, void *)
  * Returns callback argument set previously (NULL if not set or on error)
  */
 DEFINE_OSSL_get(OSSL_CMP_CTX, http_cb_arg, void *, NULL)
+#endif
 
 /* Set callback function for sending CMP request and receiving response */
 DEFINE_OSSL_set(OSSL_CMP_CTX, transfer_cb, OSSL_CMP_transfer_cb_t)

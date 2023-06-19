@@ -317,7 +317,7 @@ tx_pkt_history_remove(struct tx_pkt_history_st *h, uint64_t pkt_num)
  * n) will no longer be processed. Although datagrams may be reordered in the
  * network, a PN we receive can only become provably ACKed after our own
  * subsequently generated ACK frame is sent in a future TX packet, and then we
- * receive another RX PN acknowleding that TX packet. This means that a given RX
+ * receive another RX PN acknowledging that TX packet. This means that a given RX
  * PN can only become provably ACKed at least 1 RTT after it is received; it is
  * unlikely that any reordered datagrams will still be "in the network" (and not
  * lost) by this time. If this does occur for whatever reason and a late PN is
@@ -334,7 +334,7 @@ tx_pkt_history_remove(struct tx_pkt_history_st *h, uint64_t pkt_num)
  * we use to keep track of which PNs we have received but which have not yet
  * been provably ACKed, and thus will later need to generate an ACK frame for.
  *
- * The correspondance with the logical states discussed above is as follows. A
+ * The correspondence with the logical states discussed above is as follows. A
  * PN is in state (C) if it is below the watermark; otherwise it is in state (B)
  * if it is in the logical set of PNs, and in state (A) otherwise.
  *
@@ -430,7 +430,7 @@ static void rx_pkt_history_trim_range_count(struct rx_pkt_history_st *h)
     }
 
     /*
-     * Bump watermark to cover all PNs we removed to avoid accidential
+     * Bump watermark to cover all PNs we removed to avoid accidental
      * reprocessing of packets.
      */
     if (highest != QUIC_PN_INVALID)
@@ -911,7 +911,7 @@ static int ackm_set_loss_detection_timer(OSSL_ACKM *ackm)
 static int ackm_in_persistent_congestion(OSSL_ACKM *ackm,
                                          const OSSL_ACKM_TX_PKT *lpkt)
 {
-    /* Persistent congestion not currently implemented. */
+    /* TODO(QUIC): Persistent congestion not currently implemented. */
     return 0;
 }
 
@@ -921,7 +921,8 @@ static void ackm_on_pkts_lost(OSSL_ACKM *ackm, int pkt_space,
     const OSSL_ACKM_TX_PKT *p, *pnext;
     OSSL_RTT_INFO rtt;
     QUIC_PN largest_pn_lost = 0;
-    uint64_t num_bytes = 0;
+    OSSL_CC_LOSS_INFO loss_info = {0};
+    uint32_t flags = 0;
 
     for (p = lpkt; p != NULL; p = pnext) {
         pnext = p->lnext;
@@ -934,45 +935,40 @@ static void ackm_on_pkts_lost(OSSL_ACKM *ackm, int pkt_space,
 
             if (p->pkt_num > largest_pn_lost)
                 largest_pn_lost = p->pkt_num;
+        }
 
-            num_bytes += p->num_bytes;
+        if (!pseudo) {
+            /*
+             * If this is pseudo-loss (e.g. during connection retry) we do not
+             * inform the CC as it is not a real loss and not reflective of
+             * network conditions.
+             */
+            loss_info.tx_time = p->time;
+            loss_info.tx_size = p->num_bytes;
+
+            ackm->cc_method->on_data_lost(ackm->cc_data, &loss_info);
         }
 
         p->on_lost(p->cb_arg);
     }
 
-    if (pseudo)
-        /*
-         * If this is pseudo-loss (e.g. during connection retry) we do not
-         * inform the CC as it is not a real loss and not reflective of network
-         * conditions.
-         */
-        return;
-
     /*
-     * Only consider lost packets with regards to congestion after getting an
-     * RTT sample.
+     * Persistent congestion can only be considered if we have gotten at least
+     * one RTT sample.
      */
     ossl_statm_get_rtt_info(ackm->statm, &rtt);
+    if (!ossl_time_is_zero(ackm->first_rtt_sample)
+        && ackm_in_persistent_congestion(ackm, lpkt))
+        flags |= OSSL_CC_LOST_FLAG_PERSISTENT_CONGESTION;
 
-    if (ossl_time_is_zero(ackm->first_rtt_sample))
-        return;
-
-    ackm->cc_method->on_data_lost(ackm->cc_data,
-        largest_pn_lost,
-        ackm->tx_history[pkt_space].highest_sent,
-        num_bytes,
-        ackm_in_persistent_congestion(ackm, lpkt));
+    ackm->cc_method->on_data_lost_finished(ackm->cc_data, flags);
 }
 
 static void ackm_on_pkts_acked(OSSL_ACKM *ackm, const OSSL_ACKM_TX_PKT *apkt)
 {
     const OSSL_ACKM_TX_PKT *anext;
-    OSSL_TIME now;
-    uint64_t num_retransmittable_bytes = 0;
     QUIC_PN last_pn_acked = 0;
-
-    now = ackm->now(ackm->now_arg);
+    OSSL_CC_ACK_INFO ainfo = {0};
 
     for (; apkt != NULL; apkt = anext) {
         if (apkt->is_inflight) {
@@ -981,7 +977,6 @@ static void ackm_on_pkts_acked(OSSL_ACKM *ackm, const OSSL_ACKM_TX_PKT *apkt)
                 ackm->ack_eliciting_bytes_in_flight[apkt->pkt_space]
                     -= apkt->num_bytes;
 
-            num_retransmittable_bytes += apkt->num_bytes;
             if (apkt->pkt_num > last_pn_acked)
                 last_pn_acked = apkt->pkt_num;
 
@@ -995,12 +990,14 @@ static void ackm_on_pkts_acked(OSSL_ACKM *ackm, const OSSL_ACKM_TX_PKT *apkt)
                                               apkt->largest_acked + 1);
         }
 
+        ainfo.tx_time = apkt->time;
+        ainfo.tx_size = apkt->num_bytes;
+
         anext = apkt->anext;
         apkt->on_acked(apkt->cb_arg); /* may free apkt */
-    }
 
-    ackm->cc_method->on_data_acked(ackm->cc_data, now,
-        last_pn_acked, num_retransmittable_bytes);
+        ackm->cc_method->on_data_acked(ackm->cc_data, &ainfo);
+    }
 }
 
 OSSL_ACKM *ossl_ackm_new(OSSL_TIME (*now)(void *arg),
@@ -1096,16 +1093,12 @@ int ossl_ackm_on_rx_datagram(OSSL_ACKM *ackm, size_t num_bytes)
     return 1;
 }
 
-static void ackm_on_congestion(OSSL_ACKM *ackm, OSSL_TIME send_time)
-{
-    /* Not currently implemented. */
-}
-
 static void ackm_process_ecn(OSSL_ACKM *ackm, const OSSL_QUIC_FRAME_ACK *ack,
                              int pkt_space)
 {
     struct tx_pkt_history_st *h;
     OSSL_ACKM_TX_PKT *pkt;
+    OSSL_CC_ECN_INFO ecn_info = {0};
 
     /*
      * If the ECN-CE counter reported by the peer has increased, this could
@@ -1119,7 +1112,8 @@ static void ackm_process_ecn(OSSL_ACKM *ackm, const OSSL_QUIC_FRAME_ACK *ack,
         if (pkt == NULL)
             return;
 
-        ackm_on_congestion(ackm, pkt->time);
+        ecn_info.largest_acked_time = pkt->time;
+        ackm->cc_method->on_ecn(ackm->cc_data, &ecn_info);
     }
 }
 
@@ -1182,7 +1176,13 @@ int ossl_ackm_on_rx_ack_frame(OSSL_ACKM *ackm, const OSSL_QUIC_FRAME_ACK *ack,
                               ossl_time_subtract(now, na_pkts->time));
     }
 
-    /* Process ECN information if present. */
+    /*
+     * Process ECN information if present.
+     *
+     * We deliberately do most ECN processing in the ACKM rather than the
+     * congestion controller to avoid having to give the congestion controller
+     * access to ACKM internal state.
+     */
     if (ack->ecn_present)
         ackm_process_ecn(ackm, ack, pkt_space);
 
@@ -1676,4 +1676,9 @@ OSSL_TIME ossl_ackm_get_pto_duration(OSSL_ACKM *ackm)
         duration = ossl_time_add(duration, rtt.max_ack_delay);
 
     return duration;
+}
+
+QUIC_PN ossl_ackm_get_largest_acked(OSSL_ACKM *ackm, int pkt_space)
+{
+    return ackm->largest_acked_pkt[pkt_space];
 }

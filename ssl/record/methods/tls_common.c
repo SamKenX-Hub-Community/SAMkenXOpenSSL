@@ -1088,7 +1088,7 @@ int tls13_common_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec)
 }
 
 int tls_read_record(OSSL_RECORD_LAYER *rl, void **rechandle, int *rversion,
-                    int *type, unsigned char **data, size_t *datalen,
+                    int *type, const unsigned char **data, size_t *datalen,
                     uint16_t *epoch, unsigned char *seq_num)
 {
     TLS_RL_RECORD *rec;
@@ -1132,14 +1132,31 @@ int tls_read_record(OSSL_RECORD_LAYER *rl, void **rechandle, int *rversion,
     return OSSL_RECORD_RETURN_SUCCESS;
 }
 
-int tls_release_record(OSSL_RECORD_LAYER *rl, void *rechandle)
+int tls_release_record(OSSL_RECORD_LAYER *rl, void *rechandle, size_t length)
 {
+    TLS_RL_RECORD *rec = &rl->rrec[rl->num_released];
+
     if (!ossl_assert(rl->num_released < rl->curr_rec)
-            || !ossl_assert(rechandle == &rl->rrec[rl->num_released])) {
+            || !ossl_assert(rechandle == rec)) {
         /* Should not happen */
         RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, SSL_R_INVALID_RECORD);
         return OSSL_RECORD_RETURN_FATAL;
     }
+
+    if (rec->length < length) {
+        /* Should not happen */
+        RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+        return OSSL_RECORD_RETURN_FATAL;
+    }
+
+    if ((rl->options & SSL_OP_CLEANSE_PLAINTEXT) != 0)
+        OPENSSL_cleanse(rec->data + rec->off, length);
+
+    rec->off += length;
+    rec->length -= length;
+
+    if (rec->length > 0)
+        return OSSL_RECORD_RETURN_SUCCESS;
 
     rl->num_released++;
 
@@ -1279,6 +1296,7 @@ tls_int_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
     rl->md = md;
 
     rl->alert = SSL_AD_NO_ALERT;
+    rl->rstate = SSL_ST_READ_HEADER;
 
     if (level == OSSL_RECORD_PROTECTION_LEVEL_NONE)
         rl->is_first_record = 1;

@@ -23,9 +23,9 @@ jobs:
           no-dtls,
           no-ec,
           no-ec2m,
+          no-http,
           no-siv,
           no-legacy,
-          no-rfc3779,
           no-sock,
           no-srp,
           no-srtp,
@@ -44,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+    - name: checkout fuzz/corpora submodule
+      run: git submodule update --init --depth 1 fuzz/corpora
     - name: config
       run: CC=clang ./config --banner=Configured --strict-warnings ${{ matrix.opt }}
     - name: config dump

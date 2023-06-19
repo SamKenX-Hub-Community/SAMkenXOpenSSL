@@ -21,16 +21,14 @@ typedef struct
     X509 *refCert;             /* cert to expect for oldCertID in kur/rr msg */
     X509 *certOut;             /* certificate to be returned in cp/ip/kup msg */
     STACK_OF(X509) *chainOut;  /* chain of certOut to add to extraCerts field */
-    STACK_OF(X509) *caPubsOut; /* certs to return in caPubs field of ip msg */
+    STACK_OF(X509) *caPubsOut; /* used in caPubs of ip and in caCerts of genp */
     OSSL_CMP_PKISI *statusOut; /* status for ip/cp/kup/rp msg unless polling */
     int sendError;             /* send error response on given request type */
     OSSL_CMP_MSG *certReq;     /* ir/cr/p10cr/kur remembered while polling */
-    int certReqId;             /* id of last ir/cr/kur, used for polling */
     int pollCount;             /* number of polls before actual cert response */
     int curr_pollCount;        /* number of polls so far for current request */
     int checkAfterTime;        /* time the client should wait between polling */
 } mock_srv_ctx;
-
 
 static void mock_srv_ctx_free(mock_srv_ctx *ctx)
 {
@@ -57,7 +55,6 @@ static mock_srv_ctx *mock_srv_ctx_new(void)
         goto err;
 
     ctx->sendError = -1;
-    ctx->certReqId = -1;
 
     /* all other elements are initialized to 0 or NULL, respectively */
     return ctx;
@@ -207,7 +204,7 @@ static int refcert_cmp(const X509 *refcert,
 
 static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
                                             const OSSL_CMP_MSG *cert_req,
-                                            int certReqId,
+                                            ossl_unused int certReqId,
                                             const OSSL_CRMF_MSG *crm,
                                             const X509_REQ *p10cr,
                                             X509 **certOut,
@@ -231,7 +228,6 @@ static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
     *certOut = NULL;
     *chainOut = NULL;
     *caPubs = NULL;
-    ctx->certReqId = certReqId;
 
     if (ctx->pollCount > 0 && ctx->curr_pollCount == 0) {
         /* start polling */
@@ -267,7 +263,7 @@ static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
 
     if (ctx->certOut != NULL
             && (*certOut = X509_dup(ctx->certOut)) == NULL)
-        /* Should better return a cert produced from data in request template */
+        /* Should return a cert produced from request template, see FR #16054 */
         goto err;
     if (ctx->chainOut != NULL
             && (*chainOut = X509_chain_up_ref(ctx->chainOut)) == NULL)
@@ -335,6 +331,21 @@ static int process_genm(OSSL_CMP_SRV_CTX *srv_ctx,
         ERR_raise(ERR_LIB_CMP, CMP_R_ERROR_PROCESSING_MESSAGE);
         return 0;
     }
+    if (sk_OSSL_CMP_ITAV_num(in) == 1) {
+        OSSL_CMP_ITAV *req = sk_OSSL_CMP_ITAV_value(in, 0), *rsp;
+        ASN1_OBJECT *obj = OSSL_CMP_ITAV_get0_type(req);
+
+        if (OBJ_obj2nid(obj) == NID_id_it_caCerts) {
+            if ((*out = sk_OSSL_CMP_ITAV_new_reserve(NULL, 1)) == NULL)
+                return 0;
+            if ((rsp = OSSL_CMP_ITAV_new_caCerts(ctx->caPubsOut)) == NULL) {
+                sk_OSSL_CMP_ITAV_free(*out);
+                return 0;
+            }
+            (void)sk_OSSL_CMP_ITAV_push(*out, rsp);
+            return 1;
+        }
+    }
 
     *out = sk_OSSL_CMP_ITAV_deep_copy(in, OSSL_CMP_ITAV_dup,
                                       OSSL_CMP_ITAV_free);
@@ -387,7 +398,8 @@ static void process_error(OSSL_CMP_SRV_CTX *srv_ctx, const OSSL_CMP_MSG *error,
 }
 
 static int process_certConf(OSSL_CMP_SRV_CTX *srv_ctx,
-                            const OSSL_CMP_MSG *certConf, int certReqId,
+                            const OSSL_CMP_MSG *certConf,
+                            ossl_unused int certReqId,
                             const ASN1_OCTET_STRING *certHash,
                             const OSSL_CMP_PKISI *si)
 {
@@ -405,12 +417,6 @@ static int process_certConf(OSSL_CMP_SRV_CTX *srv_ctx,
         return 0;
     }
 
-    if (certReqId != ctx->certReqId) {
-        /* in case of error, invalid reqId -1 */
-        ERR_raise(ERR_LIB_CMP, CMP_R_BAD_REQUEST_ID);
-        return 0;
-    }
-
     if ((digest = X509_digest_sig(ctx->certOut, NULL, NULL)) == NULL)
         return 0;
     if (ASN1_OCTET_STRING_cmp(certHash, digest) != 0) {
@@ -423,7 +429,8 @@ static int process_certConf(OSSL_CMP_SRV_CTX *srv_ctx,
 }
 
 static int process_pollReq(OSSL_CMP_SRV_CTX *srv_ctx,
-                           const OSSL_CMP_MSG *pollReq, int certReqId,
+                           const OSSL_CMP_MSG *pollReq,
+                           ossl_unused int certReqId,
                            OSSL_CMP_MSG **certReq, int64_t *check_after)
 {
     mock_srv_ctx *ctx = OSSL_CMP_SRV_CTX_get0_custom_ctx(srv_ctx);

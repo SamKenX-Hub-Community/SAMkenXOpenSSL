@@ -82,12 +82,21 @@ typedef struct {
  * Suite constants, use this like:
  *          OSSL_HPKE_SUITE myvar = OSSL_HPKE_SUITE_DEFAULT;
  */
-# define OSSL_HPKE_SUITE_DEFAULT \
+# ifndef OPENSSL_NO_ECX
+#  define OSSL_HPKE_SUITE_DEFAULT \
     {\
         OSSL_HPKE_KEM_ID_X25519, \
         OSSL_HPKE_KDF_ID_HKDF_SHA256, \
         OSSL_HPKE_AEAD_ID_AES_GCM_128 \
     }
+# else
+#  define OSSL_HPKE_SUITE_DEFAULT \
+    {\
+        OSSL_HPKE_KEM_ID_P256, \
+        OSSL_HPKE_KDF_ID_HKDF_SHA256, \
+        OSSL_HPKE_AEAD_ID_AES_GCM_128 \
+    }
+#endif
 
 typedef struct ossl_hpke_ctx_st OSSL_HPKE_CTX;
 
@@ -138,11 +147,11 @@ int OSSL_HPKE_CTX_set_seq(OSSL_HPKE_CTX *ctx, uint64_t seq);
 int OSSL_HPKE_CTX_get_seq(OSSL_HPKE_CTX *ctx, uint64_t *seq);
 
 int OSSL_HPKE_suite_check(OSSL_HPKE_SUITE suite);
-int OSSL_HPKE_get_grease_value(OSSL_LIB_CTX *libctx, const char *propq,
-                               const OSSL_HPKE_SUITE *suite_in,
+int OSSL_HPKE_get_grease_value(const OSSL_HPKE_SUITE *suite_in,
                                OSSL_HPKE_SUITE *suite,
                                unsigned char *enc, size_t *enclen,
-                               unsigned char *ct, size_t ctlen);
+                               unsigned char *ct, size_t ctlen,
+                               OSSL_LIB_CTX *libctx, const char *propq);
 int OSSL_HPKE_str2suite(const char *str, OSSL_HPKE_SUITE *suite);
 size_t OSSL_HPKE_get_ciphertext_size(OSSL_HPKE_SUITE suite, size_t clearlen);
 size_t OSSL_HPKE_get_public_encap_size(OSSL_HPKE_SUITE suite);

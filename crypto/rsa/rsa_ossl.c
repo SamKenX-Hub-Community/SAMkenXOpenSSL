@@ -186,11 +186,21 @@ static BN_BLINDING *rsa_get_blinding(RSA *rsa, int *local, BN_CTX *ctx)
 {
     BN_BLINDING *ret;
 
-    if (!CRYPTO_THREAD_write_lock(rsa->lock))
+    if (!CRYPTO_THREAD_read_lock(rsa->lock))
         return NULL;
 
     if (rsa->blinding == NULL) {
-        rsa->blinding = RSA_setup_blinding(rsa, ctx);
+        /*
+         * This dance with upgrading the lock from read to write will be
+         * slower in cases of a single use RSA object, but should be
+         * significantly better in multi-thread cases (e.g. servers). It's
+         * probably worth it.
+         */
+        CRYPTO_THREAD_unlock(rsa->lock);
+        if (!CRYPTO_THREAD_write_lock(rsa->lock))
+            return NULL;
+        if (rsa->blinding == NULL)
+            rsa->blinding = RSA_setup_blinding(rsa, ctx);
     }
 
     ret = rsa->blinding;
@@ -212,7 +222,11 @@ static BN_BLINDING *rsa_get_blinding(RSA *rsa, int *local, BN_CTX *ctx)
         *local = 0;
 
         if (rsa->mt_blinding == NULL) {
-            rsa->mt_blinding = RSA_setup_blinding(rsa, ctx);
+            CRYPTO_THREAD_unlock(rsa->lock);
+            if (!CRYPTO_THREAD_write_lock(rsa->lock))
+                return NULL;
+            if (rsa->mt_blinding == NULL)
+                rsa->mt_blinding = RSA_setup_blinding(rsa, ctx);
         }
         ret = rsa->mt_blinding;
     }
@@ -257,6 +271,7 @@ static int rsa_blinding_invert(BN_BLINDING *b, BIGNUM *f, BIGNUM *unblind,
      * will only read the modulus from BN_BLINDING. In both cases it's safe
      * to access the blinding without a lock.
      */
+    BN_set_flags(f, BN_FLG_CONSTTIME);
     return BN_BLINDING_invert_ex(f, unblind, b, ctx);
 }
 
@@ -427,7 +442,7 @@ static int derive_kdk(int flen, const unsigned char *from, RSA *rsa,
      * different hash doesn't provide a Bleichenbacher oracle:
      * if the attacker can see that different versions return different
      * messages for the same ciphertext, they'll know that the message is
-     * syntethically generated, which means that the padding check failed
+     * synthetically generated, which means that the padding check failed
      */
     md = EVP_MD_fetch(rsa->libctx, "sha256", NULL);
     if (md == NULL) {
@@ -536,6 +551,11 @@ static int rsa_ossl_private_decrypt(int flen, const unsigned char *from,
         goto err;
     }
 
+    if (rsa->flags & RSA_FLAG_CACHE_PUBLIC)
+        if (!BN_MONT_CTX_set_locked(&rsa->_method_mod_n, rsa->lock,
+                                    rsa->n, ctx))
+            goto err;
+
     if (!(rsa->flags & RSA_FLAG_NO_BLINDING)) {
         blinding = rsa_get_blinding(rsa, &local_blinding, ctx);
         if (blinding == NULL) {
@@ -573,13 +593,6 @@ static int rsa_ossl_private_decrypt(int flen, const unsigned char *from,
             goto err;
         }
         BN_with_flags(d, rsa->d, BN_FLG_CONSTTIME);
-
-        if (rsa->flags & RSA_FLAG_CACHE_PUBLIC)
-            if (!BN_MONT_CTX_set_locked(&rsa->_method_mod_n, rsa->lock,
-                                        rsa->n, ctx)) {
-                BN_free(d);
-                goto err;
-            }
         if (!rsa->meth->bn_mod_exp(ret, f, d, rsa->n, ctx,
                                    rsa->_method_mod_n)) {
             BN_free(d);
@@ -588,6 +601,10 @@ static int rsa_ossl_private_decrypt(int flen, const unsigned char *from,
         /* We MUST free d before any further use of rsa->d */
         BN_free(d);
     }
+
+    if (blinding)
+        if (!rsa_blinding_invert(blinding, ret, unblind, ctx))
+            goto err;
 
     /*
      * derive the Key Derivation Key from private exponent and public
@@ -598,20 +615,9 @@ static int rsa_ossl_private_decrypt(int flen, const unsigned char *from,
             goto err;
     }
 
-    if (blinding) {
-        /*
-         * ossl_bn_rsa_do_unblind() combines blinding inversion and
-         * 0-padded BN BE serialization
-         */
-        j = ossl_bn_rsa_do_unblind(ret, blinding, unblind, rsa->n, ctx,
-                                   buf, num);
-        if (j == 0)
-            goto err;
-    } else {
-        j = BN_bn2binpad(ret, buf, num);
-        if (j < 0)
-            goto err;
-    }
+    j = BN_bn2binpad(ret, buf, num);
+    if (j < 0)
+        goto err;
 
     switch (padding) {
     case RSA_PKCS1_NO_IMPLICIT_REJECT_PADDING:

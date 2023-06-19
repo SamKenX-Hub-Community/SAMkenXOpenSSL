@@ -231,7 +231,9 @@ CMP_R_FAILED_BUILDING_OWN_CHAIN:164:failed building own chain
 CMP_R_FAILED_EXTRACTING_PUBKEY:141:failed extracting pubkey
 CMP_R_FAILURE_OBTAINING_RANDOM:110:failure obtaining random
 CMP_R_FAIL_INFO_OUT_OF_RANGE:129:fail info out of range
+CMP_R_GETTING_GENP:192:getting genp
 CMP_R_INVALID_ARGS:100:invalid args
+CMP_R_INVALID_GENP:193:invalid genp
 CMP_R_INVALID_OPTION:174:invalid option
 CMP_R_MISSING_CERTID:165:missing certid
 CMP_R_MISSING_KEY_INPUT_FOR_CREATING_PROTECTION:130:\
@@ -240,7 +242,9 @@ CMP_R_MISSING_KEY_USAGE_DIGITALSIGNATURE:142:missing key usage digitalsignature
 CMP_R_MISSING_P10CSR:121:missing p10csr
 CMP_R_MISSING_PBM_SECRET:166:missing pbm secret
 CMP_R_MISSING_PRIVATE_KEY:131:missing private key
+CMP_R_MISSING_PRIVATE_KEY_FOR_POPO:190:missing private key for popo
 CMP_R_MISSING_PROTECTION:143:missing protection
+CMP_R_MISSING_PUBLIC_KEY:183:missing public key
 CMP_R_MISSING_REFERENCE_CERT:168:missing reference cert
 CMP_R_MISSING_SECRET:178:missing secret
 CMP_R_MISSING_SENDER_IDENTIFICATION:111:missing sender identification
@@ -266,6 +270,7 @@ CMP_R_SRVCERT_DOES_NOT_VALIDATE_MSG:151:srvcert does not validate msg
 CMP_R_TOTAL_TIMEOUT:184:total timeout
 CMP_R_TRANSACTIONID_UNMATCHED:152:transactionid unmatched
 CMP_R_TRANSFER_ERROR:159:transfer error
+CMP_R_UNCLEAN_CTX:191:unclean ctx
 CMP_R_UNEXPECTED_PKIBODY:133:unexpected pkibody
 CMP_R_UNEXPECTED_PKISTATUS:185:unexpected pkistatus
 CMP_R_UNEXPECTED_PVNO:153:unexpected pvno
@@ -922,7 +927,7 @@ PEM_R_UNSUPPORTED_ENCRYPTION:114:unsupported encryption
 PEM_R_UNSUPPORTED_KEY_COMPONENTS:126:unsupported key components
 PEM_R_UNSUPPORTED_PUBLIC_KEY_TYPE:110:unsupported public key type
 PKCS12_R_CALLBACK_FAILED:115:callback failed
-PKCS12_R_CANT_PACK_STRUCTURE:100:cant pack structure
+PKCS12_R_CANT_PACK_STRUCTURE:100:can't pack structure
 PKCS12_R_CONTENT_TYPE_NOT_DATA:121:content type not data
 PKCS12_R_DECODE_ERROR:101:decode error
 PKCS12_R_ENCODE_ERROR:102:encode error
@@ -1340,6 +1345,7 @@ SSL_R_COMPRESSION_ID_NOT_WITHIN_PRIVATE_RANGE:307:\
 	compression id not within private range
 SSL_R_COMPRESSION_LIBRARY_ERROR:142:compression library error
 SSL_R_CONNECTION_TYPE_NOT_SET:144:connection type not set
+SSL_R_CONN_USE_ONLY:356:conn use only
 SSL_R_CONTEXT_NOT_DANE_ENABLED:167:context not dane enabled
 SSL_R_COOKIE_GEN_CALLBACK_FAILURE:400:cookie gen callback failure
 SSL_R_COOKIE_MISMATCH:308:cookie mismatch
@@ -1463,6 +1469,7 @@ SSL_R_NO_SHARED_CIPHER:193:no shared cipher
 SSL_R_NO_SHARED_GROUPS:410:no shared groups
 SSL_R_NO_SHARED_SIGNATURE_ALGORITHMS:376:no shared signature algorithms
 SSL_R_NO_SRTP_PROFILES:359:no srtp profiles
+SSL_R_NO_STREAM:355:no stream
 SSL_R_NO_SUITABLE_DIGEST_ALGORITHM:297:no suitable digest algorithm
 SSL_R_NO_SUITABLE_GROUPS:295:no suitable groups
 SSL_R_NO_SUITABLE_KEY_SHARE:101:no suitable key share
@@ -1754,7 +1761,7 @@ X509_R_AKID_MISMATCH:110:akid mismatch
 X509_R_BAD_SELECTOR:133:bad selector
 X509_R_BAD_X509_FILETYPE:100:bad x509 filetype
 X509_R_BASE64_DECODE_ERROR:118:base64 decode error
-X509_R_CANT_CHECK_DH_KEY:114:cant check dh key
+X509_R_CANT_CHECK_DH_KEY:114:can't check dh key
 X509_R_CERTIFICATE_VERIFICATION_FAILED:139:certificate verification failed
 X509_R_CERT_ALREADY_IN_HASH_TABLE:101:cert already in hash table
 X509_R_CRL_ALREADY_DELTA:127:crl already delta

@@ -175,8 +175,10 @@ static int poll_two_fds(int rfd, int rfd_want_read,
         /* Do not block forever; should not happen. */
         return 0;
 
+# if defined(OPENSSL_THREADS)
     if (mutex != NULL)
         ossl_crypto_mutex_unlock(mutex);
+# endif
 
     do {
         /*
@@ -200,8 +202,10 @@ static int poll_two_fds(int rfd, int rfd_want_read,
         pres = select(maxfd + 1, &rfd_set, &wfd_set, &efd_set, ptv);
     } while (pres == -1 && get_last_socket_error_is_eintr());
 
+# if defined(OPENSSL_THREADS)
     if (mutex != NULL)
         ossl_crypto_mutex_lock(mutex);
+# endif
 
     return pres < 0 ? 0 : 1;
 #else
@@ -232,8 +236,10 @@ static int poll_two_fds(int rfd, int rfd_want_read,
         /* Do not block forever; should not happen. */
         return 0;
 
+# if defined(OPENSSL_THREADS)
     if (mutex != NULL)
         ossl_crypto_mutex_unlock(mutex);
+# endif
 
     do {
         if (ossl_time_is_infinite(deadline)) {
@@ -247,8 +253,10 @@ static int poll_two_fds(int rfd, int rfd_want_read,
         pres = poll(pfds, npfd, timeout_ms);
     } while (pres == -1 && get_last_socket_error_is_eintr());
 
+# if defined(OPENSSL_THREADS)
     if (mutex != NULL)
         ossl_crypto_mutex_lock(mutex);
+# endif
 
     return pres < 0 ? 0 : 1;
 #endif
@@ -339,8 +347,9 @@ int ossl_quic_reactor_block_until_pred(QUIC_REACTOR *rtor,
              * the poll call. However this might be difficult because it
              * requires we do the call to poll(2) or equivalent syscall
              * ourselves, whereas in the general case the application does the
-             * polling and just calls SSL_tick(). Implementing this optimisation
-             * in the future will probably therefore require API changes.
+             * polling and just calls SSL_handle_events(). Implementing this
+             * optimisation in the future will probably therefore require API
+             * changes.
              */
             return 0;
     }

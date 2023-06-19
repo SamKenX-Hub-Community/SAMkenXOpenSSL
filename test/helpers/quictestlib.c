@@ -31,7 +31,7 @@ struct qtest_fault {
     QUIC_PKT_HDR pplainhdr;
     /* iovec for the plaintext packet data buffer */
     OSSL_QTX_IOVEC pplainio;
-    /* Allocted size of the plaintext packet data buffer */
+    /* Allocated size of the plaintext packet data buffer */
     size_t pplainbuf_alloc;
     qtest_fault_on_packet_plain_cb pplaincb;
     void *pplaincbarg;
@@ -262,13 +262,13 @@ int qtest_create_quic_connection(QUIC_TSERVER *qtserv, SSL *clientssl)
 
         /*
          * We're cheating. We don't take any notice of SSL_get_tick_timeout()
-         * and tick everytime around the loop anyway. This is inefficient. We
+         * and tick every time around the loop anyway. This is inefficient. We
          * can get away with it in test code because we control both ends of
          * the communications and don't expect network delays. This shouldn't
          * be done in a real application.
          */
         if (!clienterr && retc <= 0)
-            SSL_tick(clientssl);
+            SSL_handle_events(clientssl);
         if (!servererr && rets <= 0) {
             ossl_quic_tserver_tick(qtserv);
             servererr = ossl_quic_tserver_is_term_any(qtserv);
@@ -312,7 +312,7 @@ int qtest_shutdown(QUIC_TSERVER *qtserv, SSL *clientssl)
 
 int qtest_check_server_transport_err(QUIC_TSERVER *qtserv, uint64_t code)
 {
-    QUIC_TERMINATE_CAUSE cause;
+    const QUIC_TERMINATE_CAUSE *cause;
 
     ossl_quic_tserver_tick(qtserv);
 
@@ -323,8 +323,9 @@ int qtest_check_server_transport_err(QUIC_TSERVER *qtserv, uint64_t code)
         return 0;
 
     cause = ossl_quic_tserver_get_terminate_cause(qtserv);
-    if  (!TEST_true(cause.remote)
-            || !TEST_uint64_t_eq(cause.error_code, code))
+    if  (!TEST_ptr(cause)
+            || !TEST_true(cause->remote)
+            || !TEST_uint64_t_eq(cause->error_code, code))
         return 0;
 
     return 1;
@@ -736,7 +737,7 @@ static int pcipher_sendmmsg(BIO *b, BIO_MSG *msg, size_t stride,
             do {
                 if (!ossl_quic_wire_decode_pkt_hdr(&pkt,
                         0 /* TODO(QUIC): Not sure how this should be set*/, 1,
-                        &hdr, NULL))
+                        0, &hdr, NULL))
                     goto out;
 
                 /*

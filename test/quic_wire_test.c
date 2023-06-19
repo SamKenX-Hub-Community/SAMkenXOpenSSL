@@ -261,7 +261,7 @@ static int encode_case_6_dec(PACKET *pkt, ossl_ssize_t fail)
 {
     OSSL_QUIC_FRAME_CRYPTO f = {0};
 
-    if (!TEST_int_eq(ossl_quic_wire_decode_frame_crypto(pkt, &f), fail < 0))
+    if (!TEST_int_eq(ossl_quic_wire_decode_frame_crypto(pkt, 0, &f), fail < 0))
         return 0;
 
     if (fail >= 0)
@@ -358,7 +358,7 @@ static int encode_case_8_dec(PACKET *pkt, ossl_ssize_t fail)
          */
         return 1;
 
-    if (!TEST_int_eq(ossl_quic_wire_decode_frame_stream(pkt, &f), fail < 0))
+    if (!TEST_int_eq(ossl_quic_wire_decode_frame_stream(pkt, 0, &f), fail < 0))
         return 0;
 
     if (fail >= 0)
@@ -413,7 +413,7 @@ static int encode_case_9_dec(PACKET *pkt, ossl_ssize_t fail)
 {
     OSSL_QUIC_FRAME_STREAM f = {0};
 
-    if (!TEST_int_eq(ossl_quic_wire_decode_frame_stream(pkt, &f), fail < 0))
+    if (!TEST_int_eq(ossl_quic_wire_decode_frame_stream(pkt, 0, &f), fail < 0))
         return 0;
 
     if (fail >= 0)
@@ -714,8 +714,8 @@ static const unsigned char encode_case_16_conn_id[] = {
 };
 
 static const OSSL_QUIC_FRAME_NEW_CONN_ID encode_case_16_f = {
-    0x1234,
     0x9781,
+    0x1234,
     {
         0x4,
         {0x33, 0x44, 0x55, 0x66}
@@ -745,10 +745,10 @@ static int encode_case_16_dec(PACKET *pkt, ossl_ssize_t fail)
     if (fail >= 0)
         return 1;
 
-    if (!TEST_uint64_t_eq(f.seq_num, 0x1234))
+    if (!TEST_uint64_t_eq(f.seq_num, 0x9781))
         return 0;
 
-    if (!TEST_uint64_t_eq(f.retire_prior_to, 0x9781))
+    if (!TEST_uint64_t_eq(f.retire_prior_to, 0x1234))
         return 0;
 
     if (!TEST_uint64_t_eq(f.conn_id.id_len, sizeof(encode_case_16_conn_id)))
@@ -768,6 +768,52 @@ static int encode_case_16_dec(PACKET *pkt, ossl_ssize_t fail)
 }
 
 static const unsigned char encode_case_16_expect[] = {
+    0x18,                           /* Type */
+    0x80, 0x00, 0x97, 0x81,         /* Sequence Number */
+    0x52, 0x34,                     /* Retire Prior To */
+    0x04,                           /* Connection ID Length */
+    0x33, 0x44, 0x55, 0x66,         /* Connection ID */
+    0xde, 0x06, 0xcb, 0x76, 0x5d, 0xb1, 0xa7, 0x71, /* Stateless Reset Token */
+    0x78, 0x09, 0xbb, 0xe8, 0x50, 0x19, 0x12, 0x9a
+};
+
+/* 16b. NEW_CONNECTION_ID seq_num < retire_prior_to */
+static const OSSL_QUIC_FRAME_NEW_CONN_ID encode_case_16b_f = {
+    0x1234,
+    0x9781,
+    {
+        0x4,
+        {0x33, 0x44, 0x55, 0x66}
+    },
+    {
+        0xde, 0x06, 0xcb, 0x76, 0x5d, 0xb1, 0xa7, 0x71,
+        0x78, 0x09, 0xbb, 0xe8, 0x50, 0x19, 0x12, 0x9a
+    }
+};
+
+static int encode_case_16b_enc(WPACKET *pkt)
+{
+    if (!TEST_int_eq(ossl_quic_wire_encode_frame_new_conn_id(pkt,
+                                                             &encode_case_16b_f), 1))
+        return 0;
+
+    return 1;
+}
+
+static int encode_case_16b_dec(PACKET *pkt, ossl_ssize_t fail)
+{
+    OSSL_QUIC_FRAME_NEW_CONN_ID f = {0};
+
+    if (!TEST_int_eq(ossl_quic_wire_decode_frame_new_conn_id(pkt, &f), 0))
+        return 0;
+
+    if (!TEST_true(PACKET_forward(pkt, PACKET_remaining(pkt))))
+        return 0;
+
+    return 1;
+}
+
+static const unsigned char encode_case_16b_expect[] = {
     0x18,                           /* Type */
     0x52, 0x34,                     /* Sequence Number */
     0x80, 0x00, 0x97, 0x81,         /* Retire Prior To */
@@ -1137,6 +1183,7 @@ static const struct encode_test_case encode_cases[] = {
     ENCODE_CASE(14)
     ENCODE_CASE(15)
     ENCODE_CASE(16)
+    ENCODE_CASE(16b)
     ENCODE_CASE(17)
     ENCODE_CASE(18)
     ENCODE_CASE(19)
@@ -1466,7 +1513,7 @@ static int test_wire_retry_integrity_tag(void)
     if (!TEST_true(PACKET_buf_init(&pkt, retry_encoded, sizeof(retry_encoded))))
         goto err;
 
-    if (!TEST_true(ossl_quic_wire_decode_pkt_hdr(&pkt, 0, 0, &hdr, NULL)))
+    if (!TEST_true(ossl_quic_wire_decode_pkt_hdr(&pkt, 0, 0, 0, &hdr, NULL)))
         goto err;
 
     if (!TEST_int_eq(hdr.type, QUIC_PKT_TYPE_RETRY))

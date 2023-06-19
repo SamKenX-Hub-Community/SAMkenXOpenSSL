@@ -687,11 +687,9 @@ int x509_main(int argc, char **argv)
         if ((extconf = app_load_config(extfile)) == NULL)
             goto end;
         if (extsect == NULL) {
-            extsect = NCONF_get_string(extconf, "default", "extensions");
-            if (extsect == NULL) {
-                ERR_clear_error();
+            extsect = app_conf_try_string(extconf, "default", "extensions");
+            if (extsect == NULL)
                 extsect = "default";
-            }
         }
         X509V3_set_ctx_test(&ctx2);
         X509V3_set_nconf(&ctx2, extconf);
@@ -706,7 +704,8 @@ int x509_main(int argc, char **argv)
         if (infile == NULL)
             BIO_printf(bio_err,
                        "Warning: Reading cert request from stdin since no -in option is given\n");
-        req = load_csr_autofmt(infile, informat, "certificate request input");
+        req = load_csr_autofmt(infile, informat, vfyopts,
+                               "certificate request input");
         if (req == NULL)
             goto end;
 

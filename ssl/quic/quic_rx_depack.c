@@ -29,6 +29,10 @@
  * pointer argument, the few that aren't ACK eliciting will not.  This makes
  * them a verifiable pattern against tables where this is specified.
  */
+static int depack_do_implicit_stream_create(QUIC_CHANNEL *ch,
+                                            uint64_t stream_id,
+                                            uint64_t frame_type,
+                                            QUIC_STREAM **result);
 
 static int depack_do_frame_padding(PACKET *pkt)
 {
@@ -56,7 +60,8 @@ static int depack_do_frame_ping(PACKET *pkt, QUIC_CHANNEL *ch,
 
 static int depack_do_frame_ack(PACKET *pkt, QUIC_CHANNEL *ch,
                                int packet_space, OSSL_TIME received,
-                               uint64_t frame_type)
+                               uint64_t frame_type,
+                               OSSL_QRX_PKT *qpacket)
 {
     OSSL_QUIC_FRAME_ACK ack;
     OSSL_QUIC_ACK_RANGE *ack_ranges = NULL;
@@ -75,6 +80,40 @@ static int depack_do_frame_ack(PACKET *pkt, QUIC_CHANNEL *ch,
 
     if (!ossl_quic_wire_decode_frame_ack(pkt, ack_delay_exp, &ack, NULL))
         goto malformed;
+
+    if (qpacket->hdr->type == QUIC_PKT_TYPE_1RTT
+        && (qpacket->key_epoch < ossl_qrx_get_key_epoch(ch->qrx)
+            || ch->rxku_expected)
+        && ack.ack_ranges[0].end >= ch->txku_pn) {
+        /*
+         * RFC 9001 s. 6.2: An endpoint that receives an acknowledgment that is
+         * carried in a packet protected with old keys where any acknowledged
+         * packet was protected with newer keys MAY treat that as a connection
+         * error of type KEY_UPDATE_ERROR.
+         *
+         * Two cases to handle here:
+         *
+         *   - We did spontaneous TXKU, the peer has responded in kind and we
+         *     have detected RXKU; !ch->rxku_expected, but then it sent a packet
+         *     with old keys acknowledging a packet in the new key epoch.
+         *
+         *     This also covers the case where we got RXKU and triggered
+         *     solicited TXKU, and then for some reason the peer sent an ACK of
+         *     a PN in our new TX key epoch with old keys.
+         *
+         *   - We did spontaneous TXKU; ch->txku_pn is the starting PN of our
+         *     new TX key epoch; the peer has not initiated a solicited TXKU in
+         *     response (so we have not detected RXKU); in this case the RX key
+         *     epoch has not incremented and ch->rxku_expected is still 1.
+         */
+        ossl_quic_channel_raise_protocol_error(ch,
+                                               QUIC_ERR_KEY_UPDATE_ERROR,
+                                               frame_type,
+                                               "acked packet which initiated a "
+                                               "key update without a "
+                                               "corresponding key update");
+        return 0;
+    }
 
     if (!ossl_ackm_on_rx_ack_frame(ch->ackm, &ack,
                                    packet_space, received))
@@ -110,15 +149,13 @@ static int depack_do_frame_reset_stream(PACKET *pkt,
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
 
-    stream = ossl_quic_stream_map_get_by_id(&ch->qsm, frame_data.stream_id);
-    if (stream == NULL) {
-        ossl_quic_channel_raise_protocol_error(ch,
-                                               QUIC_ERR_STREAM_STATE_ERROR,
-                                               OSSL_QUIC_FRAME_TYPE_RESET_STREAM,
-                                               "RESET_STREAM frame for "
-                                               "nonexistent stream");
-        return 0;
-    }
+    if (!depack_do_implicit_stream_create(ch, frame_data.stream_id,
+                                          OSSL_QUIC_FRAME_TYPE_RESET_STREAM,
+                                          &stream))
+        return 0; /* error already raised for us */
+
+    if (stream == NULL)
+        return 1; /* old deleted stream, not a protocol violation, ignore */
 
     if (stream->rstream == NULL) {
         ossl_quic_channel_raise_protocol_error(ch,
@@ -129,7 +166,9 @@ static int depack_do_frame_reset_stream(PACKET *pkt,
         return 0;
     }
 
-    stream->peer_reset_stream = 1;
+    stream->peer_reset_stream       = 1;
+    stream->peer_reset_stream_aec   = frame_data.app_error_code;
+
     ossl_quic_stream_map_update_state(&ch->qsm, stream);
     return 1;
 }
@@ -152,15 +191,13 @@ static int depack_do_frame_stop_sending(PACKET *pkt,
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
 
-    stream = ossl_quic_stream_map_get_by_id(&ch->qsm, frame_data.stream_id);
-    if (stream == NULL) {
-        ossl_quic_channel_raise_protocol_error(ch,
-                                               QUIC_ERR_STREAM_STATE_ERROR,
-                                               OSSL_QUIC_FRAME_TYPE_STOP_SENDING,
-                                               "STOP_SENDING frame for "
-                                               "nonexistent stream");
-        return 0;
-    }
+    if (!depack_do_implicit_stream_create(ch, frame_data.stream_id,
+                                          OSSL_QUIC_FRAME_TYPE_STOP_SENDING,
+                                          &stream))
+        return 0; /* error already raised for us */
+
+    if (stream == NULL)
+        return 1; /* old deleted stream, not a protocol violation, ignore */
 
     if (stream->sstream == NULL) {
         ossl_quic_channel_raise_protocol_error(ch,
@@ -171,19 +208,30 @@ static int depack_do_frame_stop_sending(PACKET *pkt,
         return 0;
     }
 
-    stream->peer_stop_sending = 1;
-    ossl_quic_stream_map_update_state(&ch->qsm, stream);
+    stream->peer_stop_sending       = 1;
+    stream->peer_stop_sending_aec   = frame_data.app_error_code;
+
+    /*
+     * RFC 9000 s. 3.5: Receiving a STOP_SENDING frame means we must respond in
+     * turn with a RESET_STREAM frame for the same part of the stream. The other
+     * part is unaffected.
+     */
+    ossl_quic_stream_map_reset_stream_send_part(&ch->qsm, stream,
+                                                frame_data.app_error_code);
     return 1;
 }
 
 static int depack_do_frame_crypto(PACKET *pkt, QUIC_CHANNEL *ch,
                                   OSSL_QRX_PKT *parent_pkt,
-                                  OSSL_ACKM_RX_PKT *ackm_data)
+                                  OSSL_ACKM_RX_PKT *ackm_data,
+                                  uint64_t *datalen)
 {
     OSSL_QUIC_FRAME_CRYPTO f;
     QUIC_RSTREAM *rstream;
 
-    if (!ossl_quic_wire_decode_frame_crypto(pkt, &f)) {
+    *datalen = 0;
+
+    if (!ossl_quic_wire_decode_frame_crypto(pkt, 0, &f)) {
         ossl_quic_channel_raise_protocol_error(ch,
                                                QUIC_ERR_FRAME_ENCODING_ERROR,
                                                OSSL_QUIC_FRAME_TYPE_CRYPTO,
@@ -206,6 +254,8 @@ static int depack_do_frame_crypto(PACKET *pkt, QUIC_CHANNEL *ch,
     if (!ossl_quic_rstream_queue_data(rstream, parent_pkt,
                                       f.offset, f.data, f.len, 0))
         return 0;
+
+    *datalen = f.len;
 
     return 1;
 }
@@ -232,16 +282,155 @@ static int depack_do_frame_new_token(PACKET *pkt, QUIC_CHANNEL *ch,
     return 1;
 }
 
+/*
+ * Returns 1 if no protocol violation has occurred. In this case *result will be
+ * non-NULL unless this is an old deleted stream and we should ignore the frame
+ * causing this function to be called. Returns 0 on protocol violation.
+ */
+static int depack_do_implicit_stream_create(QUIC_CHANNEL *ch,
+                                            uint64_t stream_id,
+                                            uint64_t frame_type,
+                                            QUIC_STREAM **result)
+{
+    QUIC_STREAM *stream;
+    uint64_t peer_role, stream_ordinal;
+    uint64_t *p_next_ordinal_local, *p_next_ordinal_remote;
+    QUIC_RXFC *max_streams_fc;
+    int is_uni, is_remote_init;
+
+    stream = ossl_quic_stream_map_get_by_id(&ch->qsm, stream_id);
+    if (stream != NULL) {
+        *result = stream;
+        return 1;
+    }
+
+    /*
+     * If we do not yet have a stream with the given ID, there are three
+     * possibilities:
+     *
+     *   (a) The stream ID is for a remotely-created stream and the peer
+     *       is creating a stream.
+     *
+     *   (b) The stream ID is for a locally-created stream which has
+     *       previously been deleted.
+     *
+     *   (c) The stream ID is for a locally-created stream which does
+     *       not exist yet. This is a protocol violation and we must
+     *       terminate the connection in this case.
+     *
+     * We distinguish between (b) and (c) using the stream ID allocator
+     * variable. Since stream ordinals are allocated monotonically, we
+     * simply determine if the stream ordinal is in the future.
+     */
+    peer_role = ch->is_server
+        ? QUIC_STREAM_INITIATOR_CLIENT
+        : QUIC_STREAM_INITIATOR_SERVER;
+
+    is_remote_init = ((stream_id & QUIC_STREAM_INITIATOR_MASK) == peer_role);
+    is_uni = ((stream_id & QUIC_STREAM_DIR_MASK) == QUIC_STREAM_DIR_UNI);
+
+    stream_ordinal = stream_id >> 2;
+
+    if (is_remote_init) {
+        /*
+         * Peer-created stream which does not yet exist. Create it. QUIC stream
+         * ordinals within a given stream type MUST be used in sequence and
+         * receiving a STREAM frame for ordinal n must implicitly create streams
+         * with ordinals [0, n) within that stream type even if no explicit
+         * STREAM frames are received for those ordinals.
+         */
+        p_next_ordinal_remote = is_uni
+            ? &ch->next_remote_stream_ordinal_uni
+            : &ch->next_remote_stream_ordinal_bidi;
+
+        /* Check this isn't violating stream count flow control. */
+        max_streams_fc = is_uni
+            ? &ch->max_streams_uni_rxfc
+            : &ch->max_streams_bidi_rxfc;
+
+        if (!ossl_quic_rxfc_on_rx_stream_frame(max_streams_fc,
+                                               stream_ordinal + 1,
+                                               /*is_fin=*/0)) {
+            ossl_quic_channel_raise_protocol_error(ch,
+                                                   QUIC_ERR_INTERNAL_ERROR,
+                                                   frame_type,
+                                                   "internal error (stream count RXFC)");
+            return 0;
+        }
+
+        if (ossl_quic_rxfc_get_error(max_streams_fc, 0) != QUIC_ERR_NO_ERROR) {
+            ossl_quic_channel_raise_protocol_error(ch, QUIC_ERR_STREAM_LIMIT_ERROR,
+                                                   frame_type,
+                                                   "exceeded maximum allowed streams");
+            return 0;
+        }
+
+        /*
+         * Create the named stream and any streams coming before it yet to be
+         * created.
+         */
+        while (*p_next_ordinal_remote <= stream_ordinal) {
+            uint64_t cur_stream_id = (*p_next_ordinal_remote << 2) |
+                (stream_id
+                 & (QUIC_STREAM_DIR_MASK | QUIC_STREAM_INITIATOR_MASK));
+
+            stream = ossl_quic_channel_new_stream_remote(ch, cur_stream_id);
+            if (stream == NULL) {
+                ossl_quic_channel_raise_protocol_error(ch,
+                                                       QUIC_ERR_INTERNAL_ERROR,
+                                                       frame_type,
+                                                       "internal error (stream allocation)");
+                return 0;
+            }
+
+            ++*p_next_ordinal_remote;
+        }
+
+        *result = stream;
+    } else {
+        /* Locally-created stream which does not yet exist. */
+        p_next_ordinal_local = is_uni
+            ? &ch->next_local_stream_ordinal_uni
+            : &ch->next_local_stream_ordinal_bidi;
+
+        if (stream_ordinal >= *p_next_ordinal_local) {
+            /*
+             * We never created this stream yet, this is a protocol
+             * violation.
+             */
+            ossl_quic_channel_raise_protocol_error(ch,
+                                                   QUIC_ERR_STREAM_STATE_ERROR,
+                                                   frame_type,
+                                                   "STREAM frame for nonexistent "
+                                                   "stream");
+            return 0;
+        }
+
+        /*
+         * Otherwise this is for an old locally-initiated stream which we
+         * have subsequently deleted. Ignore the data; it may simply be a
+         * retransmission. We already take care of notifying the peer of the
+         * termination of the stream during the stream deletion lifecycle.
+         */
+        *result = NULL;
+    }
+
+    return 1;
+}
+
 static int depack_do_frame_stream(PACKET *pkt, QUIC_CHANNEL *ch,
                                   OSSL_QRX_PKT *parent_pkt,
                                   OSSL_ACKM_RX_PKT *ackm_data,
-                                  uint64_t frame_type)
+                                  uint64_t frame_type,
+                                  uint64_t *datalen)
 {
     OSSL_QUIC_FRAME_STREAM frame_data;
     QUIC_STREAM *stream;
     uint64_t fce;
 
-    if (!ossl_quic_wire_decode_frame_stream(pkt, &frame_data)) {
+    *datalen = 0;
+
+    if (!ossl_quic_wire_decode_frame_stream(pkt, 0, &frame_data)) {
         ossl_quic_channel_raise_protocol_error(ch,
                                                QUIC_ERR_FRAME_ENCODING_ERROR,
                                                frame_type,
@@ -252,15 +441,16 @@ static int depack_do_frame_stream(PACKET *pkt, QUIC_CHANNEL *ch,
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
 
-    stream = ossl_quic_stream_map_get_by_id(&ch->qsm, frame_data.stream_id);
-    if (stream == NULL) {
-        ossl_quic_channel_raise_protocol_error(ch,
-                                               QUIC_ERR_STREAM_STATE_ERROR,
-                                               frame_type,
-                                               "STREAM frame for nonexistent "
-                                               "stream");
-        return 0;
-    }
+    if (!depack_do_implicit_stream_create(ch, frame_data.stream_id,
+                                          frame_type, &stream))
+        return 0; /* protocol error raised by above call */
+
+    if (stream == NULL)
+        /*
+         * Data for old stream which is not a protocol violation but should be
+         * ignored, so stop here.
+         */
+        return 1;
 
     if (stream->rstream == NULL) {
         ossl_quic_channel_raise_protocol_error(ch,
@@ -305,7 +495,36 @@ static int depack_do_frame_stream(PACKET *pkt, QUIC_CHANNEL *ch,
                                       frame_data.is_fin))
         return 0;
 
+    *datalen = frame_data.len;
+
     return 1;
+}
+
+static void update_streams(QUIC_STREAM *s, void *arg)
+{
+    QUIC_CHANNEL *ch = arg;
+
+    ossl_quic_stream_map_update_state(&ch->qsm, s);
+}
+
+static void update_streams_bidi(QUIC_STREAM *s, void *arg)
+{
+    QUIC_CHANNEL *ch = arg;
+
+    if (!ossl_quic_stream_is_bidi(s))
+        return;
+
+    ossl_quic_stream_map_update_state(&ch->qsm, s);
+}
+
+static void update_streams_uni(QUIC_STREAM *s, void *arg)
+{
+    QUIC_CHANNEL *ch = arg;
+
+    if (ossl_quic_stream_is_bidi(s))
+        return;
+
+    ossl_quic_stream_map_update_state(&ch->qsm, s);
 }
 
 static int depack_do_frame_max_data(PACKET *pkt, QUIC_CHANNEL *ch,
@@ -325,7 +544,7 @@ static int depack_do_frame_max_data(PACKET *pkt, QUIC_CHANNEL *ch,
     ackm_data->is_ack_eliciting = 1;
 
     ossl_quic_txfc_bump_cwm(&ch->conn_txfc, max_data);
-    ossl_quic_stream_map_update_state(&ch->qsm, ch->stream0);
+    ossl_quic_stream_map_visit(&ch->qsm, update_streams, ch);
     return 1;
 }
 
@@ -349,15 +568,13 @@ static int depack_do_frame_max_stream_data(PACKET *pkt,
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
 
-    stream = ossl_quic_stream_map_get_by_id(&ch->qsm, stream_id);
-    if (stream == NULL) {
-        ossl_quic_channel_raise_protocol_error(ch,
-                                               QUIC_ERR_STREAM_STATE_ERROR,
-                                               OSSL_QUIC_FRAME_TYPE_MAX_STREAM_DATA,
-                                               "MAX_STREAM_DATA for nonexistent "
-                                               "stream");
-        return 0;
-    }
+    if (!depack_do_implicit_stream_create(ch, stream_id,
+                                          OSSL_QUIC_FRAME_TYPE_MAX_STREAM_DATA,
+                                          &stream))
+        return 0; /* error already raised for us */
+
+    if (stream == NULL)
+        return 1; /* old deleted stream, not a protocol violation, ignore */
 
     if (stream->sstream == NULL) {
         ossl_quic_channel_raise_protocol_error(ch,
@@ -404,17 +621,15 @@ static int depack_do_frame_max_streams(PACKET *pkt,
         if (max_streams > ch->max_local_streams_bidi)
             ch->max_local_streams_bidi = max_streams;
 
-        /* Stream may now be able to send */
-        ossl_quic_stream_map_update_state(&ch->qsm,
-                                          ch->stream0);
+        /* Some streams may now be able to send. */
+        ossl_quic_stream_map_visit(&ch->qsm, update_streams_bidi, ch);
         break;
     case OSSL_QUIC_FRAME_TYPE_MAX_STREAMS_UNI:
         if (max_streams > ch->max_local_streams_uni)
             ch->max_local_streams_uni = max_streams;
 
-        /* Stream may now be able to send */
-        ossl_quic_stream_map_update_state(&ch->qsm,
-                                          ch->stream0);
+        /* Some streams may now be able to send. */
+        ossl_quic_stream_map_visit(&ch->qsm, update_streams_uni, ch);
         break;
     default:
         ossl_quic_channel_raise_protocol_error(ch,
@@ -454,6 +669,7 @@ static int depack_do_frame_stream_data_blocked(PACKET *pkt,
 {
     uint64_t stream_id = 0;
     uint64_t max_data = 0;
+    QUIC_STREAM *stream;
 
     if (!ossl_quic_wire_decode_frame_stream_data_blocked(pkt, &stream_id,
                                                          &max_data)) {
@@ -466,6 +682,15 @@ static int depack_do_frame_stream_data_blocked(PACKET *pkt,
 
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
+
+    /*
+     * This is an informative/debugging frame, so we don't have to do anything,
+     * but it does trigger stream creation.
+     */
+    if (!depack_do_implicit_stream_create(ch, stream_id,
+                                          OSSL_QUIC_FRAME_TYPE_STREAM_DATA_BLOCKED,
+                                          &stream))
+        return 0; /* error already raised for us */
 
     /* No-op - informative/debugging frame. */
     return 1;
@@ -510,7 +735,7 @@ static int depack_do_frame_new_conn_id(PACKET *pkt,
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
 
-    /* TODO(QUIC): ADD CODE to send |frame_data.data| to the ch manager */
+    ossl_quic_channel_on_new_conn_id(ch, &frame_data);
 
     return 1;
 }
@@ -532,7 +757,7 @@ static int depack_do_frame_retire_conn_id(PACKET *pkt,
     /* This frame makes the packet ACK eliciting */
     ackm_data->is_ack_eliciting = 1;
 
-    /* TODO(QUIC): ADD CODE to send |seq_num| to the ch manager */
+    /* TODO(QUIC): Post MVP ADD CODE to send |seq_num| to the ch manager */
     return 1;
 }
 
@@ -615,6 +840,11 @@ static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
 
     while (PACKET_remaining(pkt) > 0) {
         uint64_t frame_type;
+        const unsigned char *sof = NULL;
+        uint64_t datalen = 0;
+
+        if (ch->msg_callback != NULL)
+            sof = PACKET_data(pkt);
 
         if (!ossl_quic_wire_peek_frame_header(pkt, &frame_type))
             return 0;
@@ -642,7 +872,7 @@ static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
                 return 0;
             }
             if (!depack_do_frame_ack(pkt, ch, packet_space, received,
-                                     frame_type))
+                                     frame_type, parent_pkt))
                 return 0;
             break;
 
@@ -683,7 +913,7 @@ static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
                                                        "CRYPTO frame not valid in 0-RTT");
                 return 0;
             }
-            if (!depack_do_frame_crypto(pkt, ch, parent_pkt, ackm_data))
+            if (!depack_do_frame_crypto(pkt, ch, parent_pkt, ackm_data, &datalen))
                 return 0;
             break;
         case OSSL_QUIC_FRAME_TYPE_NEW_TOKEN:
@@ -717,7 +947,7 @@ static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
                 return 0;
             }
             if (!depack_do_frame_stream(pkt, ch, parent_pkt, ackm_data,
-                                        frame_type))
+                                        frame_type, &datalen))
                 return 0;
             break;
 
@@ -896,6 +1126,23 @@ static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
                                                    frame_type,
                                                    "Unknown frame type received");
             return 0;
+        }
+
+        if (ch->msg_callback != NULL) {
+            int ctype = SSL3_RT_QUIC_FRAME_FULL;
+
+            size_t framelen = PACKET_data(pkt) - sof;
+
+            if (frame_type == OSSL_QUIC_FRAME_TYPE_PADDING) {
+                ctype = SSL3_RT_QUIC_FRAME_PADDING;
+            } else if (OSSL_QUIC_FRAME_TYPE_IS_STREAM(frame_type)
+                    || frame_type == OSSL_QUIC_FRAME_TYPE_CRYPTO) {
+                ctype = SSL3_RT_QUIC_FRAME_HEADER;
+                framelen -= (size_t)datalen;
+            }
+
+            ch->msg_callback(0, OSSL_QUIC1_VERSION, ctype, sof, framelen,
+                             ch->msg_callback_ssl, ch->msg_callback_arg);
         }
     }
 

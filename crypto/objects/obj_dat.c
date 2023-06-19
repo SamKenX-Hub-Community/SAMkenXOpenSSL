@@ -57,9 +57,6 @@ static ossl_inline void objs_free_locks(void)
 
 DEFINE_RUN_ONCE_STATIC(obj_lock_initialise)
 {
-    /* Make sure we've loaded config before checking for any "added" objects */
-    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL);
-
     ossl_obj_lock = CRYPTO_THREAD_lock_new();
     if (ossl_obj_lock == NULL)
         return 0;
@@ -76,6 +73,8 @@ DEFINE_RUN_ONCE_STATIC(obj_lock_initialise)
 
 static ossl_inline int ossl_init_added_lock(void)
 {
+    /* Make sure we've loaded config before checking for any "added" objects */
+    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL);
     return RUN_ONCE(&ossl_obj_lock_init, obj_lock_initialise);
 }
 
@@ -464,6 +463,25 @@ int OBJ_obj2txt(char *buf, int buf_len, const ASN1_OBJECT *a, int no_name)
 
     first = 1;
     bl = NULL;
+
+    /*
+     * RFC 2578 (STD 58) says this about OBJECT IDENTIFIERs:
+     *
+     * > 3.5. OBJECT IDENTIFIER values
+     * >
+     * > An OBJECT IDENTIFIER value is an ordered list of non-negative
+     * > numbers. For the SMIv2, each number in the list is referred to as a
+     * > sub-identifier, there are at most 128 sub-identifiers in a value,
+     * > and each sub-identifier has a maximum value of 2^32-1 (4294967295
+     * > decimal).
+     *
+     * So a legitimate OID according to this RFC is at most (32 * 128 / 7),
+     * i.e. 586 bytes long.
+     *
+     * Ref: https://datatracker.ietf.org/doc/html/rfc2578#section-3.5
+     */
+    if (len > 586)
+        goto err;
 
     while (len > 0) {
         l = 0;

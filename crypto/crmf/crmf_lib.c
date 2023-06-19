@@ -29,8 +29,8 @@
 #include <openssl/asn1t.h>
 
 #include "crmf_local.h"
-#include "internal/constant_time.h"
 #include "internal/sizes.h"
+#include "crypto/evp.h"
 #include "crypto/x509.h"
 
 /* explicit #includes not strictly needed since implied by the above: */
@@ -541,13 +541,12 @@ int OSSL_CRMF_MSGS_verify_popo(const OSSL_CRMF_MSGS *reqs,
     return 1;
 }
 
-const X509_PUBKEY
+X509_PUBKEY
 *OSSL_CRMF_CERTTEMPLATE_get0_publicKey(const OSSL_CRMF_CERTTEMPLATE *tmpl)
 {
     return tmpl != NULL ? tmpl->publicKey : NULL;
 }
 
-/* retrieves the serialNumber of the given cert template or NULL on error */
 const ASN1_INTEGER
 *OSSL_CRMF_CERTTEMPLATE_get0_serialNumber(const OSSL_CRMF_CERTTEMPLATE *tmpl)
 {
@@ -560,7 +559,6 @@ const X509_NAME
     return tmpl != NULL ? tmpl->subject : NULL;
 }
 
-/* retrieves the issuer name of the given cert template or NULL on error */
 const X509_NAME
 *OSSL_CRMF_CERTTEMPLATE_get0_issuer(const OSSL_CRMF_CERTTEMPLATE *tmpl)
 {
@@ -573,14 +571,12 @@ X509_EXTENSIONS
     return tmpl != NULL ? tmpl->extensions : NULL;
 }
 
-/* retrieves the issuer name of the given CertId or NULL on error */
 const X509_NAME *OSSL_CRMF_CERTID_get0_issuer(const OSSL_CRMF_CERTID *cid)
 {
     return cid != NULL && cid->issuer->type == GEN_DIRNAME ?
         cid->issuer->d.directoryName : NULL;
 }
 
-/* retrieves the serialNumber of the given CertId or NULL on error */
 const ASN1_INTEGER *OSSL_CRMF_CERTID_get0_serialNumber(const OSSL_CRMF_CERTID
                                                        *cid)
 {
@@ -588,8 +584,8 @@ const ASN1_INTEGER *OSSL_CRMF_CERTID_get0_serialNumber(const OSSL_CRMF_CERTID
 }
 
 /*-
- * fill in certificate template.
- * Any value argument that is NULL will leave the respective field unchanged.
+ * Fill in the certificate template |tmpl|.
+ * Any other NULL argument will leave the respective field unchanged.
  */
 int OSSL_CRMF_CERTTEMPLATE_fill(OSSL_CRMF_CERTTEMPLATE *tmpl,
                                 EVP_PKEY *pubkey,
@@ -665,28 +661,12 @@ X509
     cikeysize = EVP_CIPHER_get_key_length(cipher);
     /* first the symmetric key needs to be decrypted */
     pkctx = EVP_PKEY_CTX_new_from_pkey(libctx, pkey, propq);
-    if (pkctx != NULL && EVP_PKEY_decrypt_init(pkctx) > 0) {
-        ASN1_BIT_STRING *encKey = ecert->encSymmKey;
-        size_t failure;
-        int retval;
-
-        if (EVP_PKEY_decrypt(pkctx, NULL, &eksize,
-                             encKey->data, encKey->length) <= 0
-                || (ek = OPENSSL_malloc(eksize)) == NULL)
-            goto end;
-        retval = EVP_PKEY_decrypt(pkctx, ek, &eksize,
-                                  encKey->data, encKey->length);
-        ERR_clear_error(); /* error state may have sensitive information */
-        failure = ~constant_time_is_zero_s(constant_time_msb(retval)
-                                           | constant_time_is_zero(retval));
-        failure |= ~constant_time_eq_s(eksize, (size_t)cikeysize);
-        if (failure) {
-            ERR_raise(ERR_LIB_CRMF, CRMF_R_ERROR_DECRYPTING_SYMMETRIC_KEY);
-            goto end;
-        }
-    } else {
+    if (pkctx == NULL || EVP_PKEY_decrypt_init(pkctx) <= 0
+        || evp_pkey_decrypt_alloc(pkctx, &ek, &eksize, (size_t)cikeysize,
+                                  ecert->encSymmKey->data,
+                                  ecert->encSymmKey->length) <= 0)
         goto end;
-    }
+
     if ((iv = OPENSSL_malloc(EVP_CIPHER_get_iv_length(cipher))) == NULL)
         goto end;
     if (ASN1_TYPE_get_octetstring(ecert->symmAlg->parameter, iv,

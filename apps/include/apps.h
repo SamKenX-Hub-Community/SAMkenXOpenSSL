@@ -65,6 +65,9 @@ BIO *dup_bio_err(int format);
 BIO *bio_open_owner(const char *filename, int format, int private);
 BIO *bio_open_default(const char *filename, char mode, int format);
 BIO *bio_open_default_quiet(const char *filename, char mode, int format);
+char *app_conf_try_string(const CONF *cnf, const char *group, const char *name);
+int app_conf_try_number(const CONF *conf, const char *group, const char *name,
+                        long *result);
 CONF *app_load_config_bio(BIO *in, const char *filename);
 # define app_load_config(filename) app_load_config_internal(filename, 0)
 # define app_load_config_quiet(filename) app_load_config_internal(filename, 1)
@@ -114,7 +117,8 @@ char *get_passwd(const char *pass, const char *desc);
 int app_passwd(const char *arg1, const char *arg2, char **pass1, char **pass2);
 int add_oid_section(CONF *conf);
 X509_REQ *load_csr(const char *file, int format, const char *desc);
-X509_REQ *load_csr_autofmt(const char *infile, int format, const char *desc);
+X509_REQ *load_csr_autofmt(const char *infile, int format,
+                           STACK_OF(OPENSSL_STRING) *vfyopts, const char *desc);
 X509 *load_cert_pass(const char *uri, int format, int maybe_stdin,
                      const char *pass, const char *desc);
 # define load_cert(uri, format, desc) load_cert_pass(uri, format, 1, NULL, desc)
